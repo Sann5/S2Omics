@@ -14,6 +14,9 @@ import random
 
 
 Image.MAX_IMAGE_PIXELS = None
+MAX_SAVEFIG_DIMENSION = 65000
+MAX_SAVEFIG_PIXELS = 100000000
+MAX_JPEG_DIMENSION = 65000
 
 
 def _is_tiff(filename):
@@ -87,6 +90,46 @@ def save_image(img, filename):
     else:
         Image.fromarray(img).save(filename)
     print(filename)
+
+
+def save_figure_safely(fig, filename, dpi=300, format=None,
+                       max_dimension=MAX_SAVEFIG_DIMENSION,
+                       max_pixels=MAX_SAVEFIG_PIXELS,
+                       dimension_margin=0.95,
+                       prefer_tiff_when_rescaled=True,
+                       **savefig_kwargs):
+    mkdir(filename)
+    figure_width, figure_height = fig.get_size_inches()
+    figure_width = max(float(figure_width), 1.0)
+    figure_height = max(float(figure_height), 1.0)
+    max_inches = max(figure_width, figure_height)
+    area_inches = figure_width * figure_height
+    safe_dimension = max(int(max_dimension * dimension_margin), 1)
+    safe_pixels = max(int(max_pixels * dimension_margin), 1)
+    dimension_limited_dpi = max(int(safe_dimension // max_inches), 1)
+    pixel_limited_dpi = max(int(np.sqrt(safe_pixels / area_inches)), 1)
+    safe_dpi = min(int(dpi), dimension_limited_dpi, pixel_limited_dpi)
+
+    output_filename = filename
+    output_format = format or os.path.splitext(filename)[1].lstrip('.')
+    if output_format == '':
+        output_format = None
+
+    if output_format is not None:
+        output_format = output_format.lower()
+    projected_width = int(np.ceil(figure_width * safe_dpi))
+    projected_height = int(np.ceil(figure_height * safe_dpi))
+    if (
+        prefer_tiff_when_rescaled
+        and safe_dpi < int(dpi)
+        and output_format in {'jpg', 'jpeg'}
+        and max(projected_width, projected_height) > MAX_JPEG_DIMENSION
+    ):
+        output_filename = os.path.splitext(filename)[0] + '.tiff'
+        output_format = 'tiff'
+
+    fig.savefig(output_filename, dpi=safe_dpi, format=output_format, **savefig_kwargs)
+    return output_filename, safe_dpi
 
 
 def read_lines(filename):

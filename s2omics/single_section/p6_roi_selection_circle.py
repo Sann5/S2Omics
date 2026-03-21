@@ -6,7 +6,7 @@ from tqdm import tqdm
 import cv2
 import math
 from ..s1_utils import (
-        load_image, load_pickle, save_pickle, setup_seed, get_image_filename)
+    get_image_filename, load_image, load_pickle, save_figure_safely, save_pickle, setup_seed)
 
 def euclid_distance(point1, point2):
     tmp = np.array(point1)-np.array(point2)
@@ -137,8 +137,16 @@ def region_selection_random(save_folder, cluster_image, cluster_image_rgb, valid
             for i in range(len(best_roi)):
                 ax.add_patch(plt.Circle([best_roi[i][0],best_roi[i][1]], window_size[0],
                                         color='red',fill=False, linewidth=2))
-            plt.savefig(save_folder+f'best_{curr_num_roi+1}_roi_on_histo_clusters.jpg', 
-                        format='jpg', dpi=1200, bbox_inches='tight',pad_inches=0)
+            fig = plt.gcf()
+            save_figure_safely(
+                fig,
+                save_folder+f'best_{curr_num_roi+1}_roi_on_histo_clusters.jpg',
+                format='jpg',
+                dpi=1200,
+                bbox_inches='tight',
+                pad_inches=0,
+            )
+            plt.close(fig)
         # if roi score increased less than optimal_roi_thres, there's no need to select this one more ROI  
         if best_roi_score[0] - pre2_best_roi_score[0] < 2*optimal_roi_thres and pre1_best_roi_score[0] - pre2_best_roi_score[0] < optimal_roi_thres and curr_num_roi >= num_roi:  
             curr_num_roi = len(best_roi)
@@ -173,8 +181,16 @@ def region_selection_random(save_folder, cluster_image, cluster_image_rgb, valid
             for i in range(len(best_roi)):
                 ax.add_patch(plt.Circle([best_roi[i][0], best_roi[i][1]], window_size[0],
                                         color='red', fill=False, linewidth=2))
-            plt.savefig(save_folder+f'best_{curr_num_roi+1}_roi_on_histo_clusters.jpg', 
-                        format='jpg', dpi=1200, bbox_inches='tight',pad_inches=0)
+            fig = plt.gcf()
+            save_figure_safely(
+                fig,
+                save_folder+f'best_{curr_num_roi+1}_roi_on_histo_clusters.jpg',
+                format='jpg',
+                dpi=1200,
+                bbox_inches='tight',
+                pad_inches=0,
+            )
+            plt.close(fig)
         # if roi score increased less than optimal_roi_thres, there's no need to select this one more ROI
         if best_roi_score[0] - pre2_best_roi_score[0] < 2*optimal_roi_thres and pre1_best_roi_score[0] - pre2_best_roi_score[0] < optimal_roi_thres and curr_num_roi >= num_roi:  
             curr_num_roi = len(best_roi)
@@ -312,7 +328,7 @@ def roi_selection_for_single_section(prefix, save_folder,
     save_pickle([best_roi_list, best_roi_mask_list, best_comp_list, best_roi_score_list], 
                 save_subfolder+'best_roi.pickle')
 
-    plt.figure(figsize=plt_figsize)
+    fig = plt.figure(figsize=plt_figsize)
     best_roi = best_roi_list[-1]
     best_roi_score = best_roi_score_list[-1][0]
     plt.imshow(cluster_image_rgb)
@@ -328,18 +344,30 @@ def roi_selection_for_single_section(prefix, save_folder,
         ax.add_patch(plt.Circle([best_roi[i][0], best_roi[i][1]], window_size[0],
                                 color='red', fill=False, linewidth=2))
     if has_annotation:
-        plt.savefig(main_output_folder+'best_roi_on_annotation.jpg', 
-                format='jpg', dpi=1200, bbox_inches='tight',pad_inches=0)
+        output_path, output_dpi = save_figure_safely(
+            fig,
+            main_output_folder+'best_roi_on_annotation.jpg',
+            format='jpg',
+            dpi=1200,
+            bbox_inches='tight',
+            pad_inches=0,
+        )
     else:
-        plt.savefig(main_output_folder+'best_roi_on_histology_segmentations.jpg', 
-                    format='jpg', dpi=1200, bbox_inches='tight',pad_inches=0)
-    plt.close()
+        output_path, output_dpi = save_figure_safely(
+            fig,
+            main_output_folder+'best_roi_on_histology_segmentations.jpg',
+            format='jpg',
+            dpi=1200,
+            bbox_inches='tight',
+            pad_inches=0,
+        )
+    plt.close(fig)
     if has_annotation:
-        print('Best ROI on annotation image is stored at '+main_output_folder+'best_roi_on_annotation.jpg')
+        print(f'Best ROI on annotation image is stored at {output_path} (dpi={output_dpi})')
     else:
-        print('Best ROI on histology segmentation image is stored at '+main_output_folder+'best_roi_on_histology_segmentations.jpg')
+        print(f'Best ROI on histology segmentation image is stored at {output_path} (dpi={output_dpi})')
 
-    plt.figure(figsize=plt_figsize)
+    fig = plt.figure(figsize=plt_figsize)
     plt.imshow(he)
     plt.title('H&E image', fontsize=20)
     plt.text(1,np.shape(he)[0]-1,f'ROI score: {round(best_roi_score,3)}',fontdict=fontdict)
@@ -347,6 +375,13 @@ def roi_selection_for_single_section(prefix, save_folder,
     for i in range(len(best_roi)):
         ax.add_patch(plt.Circle([best_roi[i][0]*down_samp_step*16, best_roi[i][1]*down_samp_step*16],
                                 window_size[0]*down_samp_step*16, color='red',fill=False, linewidth=3))
-    plt.savefig(main_output_folder+'best_roi_on_he.jpg', 
-                format='jpg', dpi=600, bbox_inches='tight',pad_inches=0)
-    print('Best ROI on H&E image is stored at '+main_output_folder+'best_roi_on_he.jpg')
+    output_path, output_dpi = save_figure_safely(
+        fig,
+        main_output_folder+'best_roi_on_he.jpg',
+        format='jpg',
+        dpi=600,
+        bbox_inches='tight',
+        pad_inches=0,
+    )
+    plt.close(fig)
+    print(f'Best ROI on H&E image is stored at {output_path} (dpi={output_dpi})')

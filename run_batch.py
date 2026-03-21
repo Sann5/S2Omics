@@ -1,9 +1,12 @@
 import argparse
+import gc
 import glob
 import os
 import sys
 import traceback
 from pathlib import Path
+
+import matplotlib.pyplot as plt
 
 from s2omics.p1_histology_preprocess import histology_preprocess
 from s2omics.p2_superpixel_quality_control import superpixel_quality_control
@@ -305,6 +308,9 @@ def main():
             failed.append(ndpi_path)
             if args.stop_on_error:
                 break
+        finally:
+            plt.close("all")
+            gc.collect()
 
     print("\nBatch finished.")
     print(f"Success: {len(files) - len(failed)}")

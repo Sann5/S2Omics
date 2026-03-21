@@ -200,13 +200,20 @@ def label_broadcasting(WSI_datapath, WSI_save_folder,
     for cluster in range(num_cell_types):
         pred_image_rgb[pred_image==cluster] = color_list[cluster_color_mapping[cluster]]
     pred_image_rgb = np.array(pred_image_rgb, dtype='int')
-    plt.figure(figsize=plt_figsize)
+    fig = plt.figure(figsize=plt_figsize)
     plt.imshow(pred_image_rgb)
     ax = plt.gca()
     legend_x = legend_y = np.zeros(num_cell_types)
     for i in range(num_cell_types):
         plt.scatter(legend_x, legend_y, c=color_list_16bit[i])
     plt.legend((unique_cell_type), fontsize=12)
-    plt.savefig(WSI_datapath+'S2Omics_whole_slide_prediction.jpg',
-                format='jpg', dpi=600, bbox_inches='tight',pad_inches=0)
-    print('Predicted cell type distribution for the whole-slide H&E data is stored at: '+WSI_datapath+'S2Omics_whole_slide_prediction.jpg')
+    output_path, output_dpi = save_figure_safely(
+        fig,
+        WSI_datapath+'S2Omics_whole_slide_prediction.jpg',
+        format='jpg',
+        dpi=600,
+        bbox_inches='tight',
+        pad_inches=0,
+    )
+    plt.close(fig)
+    print(f'Predicted cell type distribution for the whole-slide H&E data is stored at: {output_path} (dpi={output_dpi})')

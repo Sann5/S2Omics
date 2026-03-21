@@ -10,7 +10,7 @@ from skfuzzy.cluster import cmeans
 from scipy.cluster.hierarchy import linkage
 from sklearn.metrics import silhouette_score, calinski_harabasz_score, davies_bouldin_score
 from ..s1_utils import (
-        load_pickle, save_pickle, setup_seed)
+    load_pickle, save_figure_safely, save_pickle, setup_seed)
 
 def get_histology_segmentation(prefix, save_folder,
                               foundation_model='uni', cache_path='',
@@ -167,6 +167,13 @@ def get_histology_segmentation(prefix, save_folder,
         plt.scatter(legend_x, legend_y, c=color_list_16bit[i])
     cluster_names = [f'cluster {i}' for i in range(1, n_clusters+1)]
     plt.legend((cluster_names), fontsize=12)
-    plt.savefig(image_folder+f'cluster_image_num_clusters_{n_clusters}.jpg', 
-                format='jpg', dpi=dpi, bbox_inches='tight',pad_inches=0)
-    print('Segmentation image is stored at: '+image_folder+f'cluster_image_num_clusters_{n_clusters}.jpg')
+    output_path, output_dpi = save_figure_safely(
+        fig,
+        image_folder+f'cluster_image_num_clusters_{n_clusters}.jpg',
+        format='jpg',
+        dpi=dpi,
+        bbox_inches='tight',
+        pad_inches=0,
+    )
+    plt.close(fig)
+    print(f'Segmentation image is stored at: {output_path} (dpi={output_dpi})')

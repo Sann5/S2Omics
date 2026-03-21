@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 from scipy.cluster.hierarchy import dendrogram, linkage, fcluster
 from ..s1_utils import (
-        load_pickle, save_pickle, setup_seed)
+    load_pickle, save_figure_safely, save_pickle, setup_seed)
 
 
 def merge_over_clusters(prefix, save_folder,
@@ -113,6 +113,13 @@ def merge_over_clusters(prefix, save_folder,
             plt.scatter(legend_x, legend_y, c=color_list_16bit[i])
         cluster_names = [f'cluster {i}' for i in range(1, num_adjusted_clusters+1)]
         plt.legend((cluster_names), fontsize=12)
-        plt.savefig(image_folder+f'adjusted_cluster_image_num_clusters_{num_adjusted_clusters}.jpg', 
-                    format='jpg', dpi=dpi, bbox_inches='tight',pad_inches=0)
-        print('Adjusted segmentation image is stored at: '+image_folder+f'adjusted_cluster_image_num_clusters_{num_adjusted_clusters}.jpg')
+        output_path, output_dpi = save_figure_safely(
+            fig,
+            image_folder+f'adjusted_cluster_image_num_clusters_{num_adjusted_clusters}.jpg',
+            format='jpg',
+            dpi=dpi,
+            bbox_inches='tight',
+            pad_inches=0,
+        )
+        plt.close(fig)
+        print(f'Adjusted segmentation image is stored at: {output_path} (dpi={output_dpi})')
