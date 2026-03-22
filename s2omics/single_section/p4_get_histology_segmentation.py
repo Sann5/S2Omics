@@ -12,11 +12,100 @@ from sklearn.metrics import silhouette_score, calinski_harabasz_score, davies_bo
 from ..s1_utils import (
     load_pickle, save_figure_safely, save_pickle, setup_seed)
 
+
+def _normalize_save_folder(save_folder):
+    if not os.path.exists(save_folder):
+        os.makedirs(save_folder)
+    save_folder = save_folder + '/'
+    if not os.path.exists(save_folder + 'image_files'):
+        os.makedirs(save_folder + 'image_files')
+    if not os.path.exists(save_folder + 'pickle_files'):
+        os.makedirs(save_folder + 'pickle_files')
+    return save_folder
+
+
+def _load_embedding_parts(cache_path, foundation_model, down_samp_step):
+    he_embed_total = []
+    i = 0
+    while 1 > 0:
+        embedding_path = cache_path + foundation_model + f'_embeddings_downsamp_{down_samp_step}_part_{i}.pickle'
+        if os.path.exists(embedding_path):
+            he_embed_part = load_pickle(embedding_path)
+            he_embed_total.append(he_embed_part)
+            i += 1
+        else:
+            break
+    if len(he_embed_total) == 0:
+        raise FileNotFoundError(
+            f'No embedding parts found in {cache_path} for model={foundation_model}, down_samp_step={down_samp_step}'
+        )
+    return np.concatenate(he_embed_total)
+
+
+def fit_global_pca_for_samples(
+    save_folder_list,
+    foundation_model='uni',
+    down_samp_step=10,
+    n_components=80,
+    pca_save_path='',
+):
+    '''
+    Fit one global PCA model across multiple samples using QC-filtered embeddings.
+    Parameters:
+        save_folder_list: list of per-sample S2Omics output folders
+        foundation_model: foundation model used during step 3
+        down_samp_step: down-sampling step used during step 3
+        n_components: number of PCA components
+        pca_save_path: optional output path for serialized PCA model
+    Returns:
+        fitted PCA encoder
+    '''
+    if len(save_folder_list) == 0:
+        raise ValueError('save_folder_list is empty.')
+
+    he_embed_qc_all = []
+
+    for save_folder in save_folder_list:
+        save_folder = _normalize_save_folder(save_folder)
+        pickle_folder = save_folder + 'pickle_files/'
+
+        shapes = load_pickle(pickle_folder + 'shapes.pickle')
+        image_shape = shapes['tiles']
+        qc_preserve_indicator = load_pickle(pickle_folder + 'qc_preserve_indicator.pickle')
+        qc_mask = np.reshape(qc_preserve_indicator, image_shape)
+
+        cache_path = pickle_folder
+        he_embed_total = _load_embedding_parts(cache_path, foundation_model, down_samp_step)
+
+        down_samp_mask = np.full(image_shape, False)
+        down_samp_shape = [(image_shape[0] - 1) // down_samp_step + 1, (image_shape[1] - 1) // down_samp_step + 1]
+        for i in range(down_samp_shape[0]):
+            for j in range(down_samp_shape[1]):
+                down_samp_mask[i * down_samp_step, j * down_samp_step] = True
+
+        he_embed_qc = he_embed_total[qc_mask[down_samp_mask]]
+        he_embed_qc_all.append(he_embed_qc)
+
+    he_embed_qc_all = np.concatenate(he_embed_qc_all)
+    print(f'Fitting global PCA on {he_embed_qc_all.shape[0]} superpixels from {len(save_folder_list)} samples...')
+
+    pca_encoder = PCA(n_components=n_components)
+    pca_encoder.fit(he_embed_qc_all)
+    explained_var = np.sum(pca_encoder.explained_variance_ratio_)
+    print(f'Global PCA explained variance ratio sum: {explained_var:.4f}')
+
+    if len(pca_save_path) > 0:
+        save_pickle(pca_encoder, pca_save_path)
+        print(f'Saved global PCA model to: {pca_save_path}')
+
+    return pca_encoder
+
 def get_histology_segmentation(prefix, save_folder,
                               foundation_model='uni', cache_path='',
                               down_samp_step=10, clustering_method='kmeans',
                               n_clusters=20, resolution=1.0,
-                              if_evaluate=False):
+                              if_evaluate=False, pca_encoder=None,
+                              pca_model_path=''):
     '''
     extracting hierarchical features of superpixels using a modified version of UNI
     Parameters:
@@ -32,16 +121,12 @@ def get_histology_segmentation(prefix, save_folder,
             Please notice that this is not the final number of clusters when clustering method is fcm.
         resolution: resolution for leiden algorithm, default=1.0
         if_evaluate: if evaluate the clustering results by quantitative metrics, default=False
+        pca_encoder: optional pre-fitted PCA encoder; if provided, local PCA fitting is skipped
+        pca_model_path: optional path to serialized PCA encoder (used when pca_encoder is None)
     '''
-    if not os.path.exists(save_folder):
-        os.makedirs(save_folder)
-    save_folder = save_folder+'/'
-    if not os.path.exists(save_folder+'image_files'):
-        os.makedirs(save_folder+'image_files')
-    image_folder = save_folder+'image_files/'
-    if not os.path.exists(save_folder+'pickle_files'):
-        os.makedirs(save_folder+'pickle_files')
-    pickle_folder = save_folder+'pickle_files/'
+    save_folder = _normalize_save_folder(save_folder)
+    image_folder = save_folder + 'image_files/'
+    pickle_folder = save_folder + 'pickle_files/'
     
     # load in previously obtained params
     shapes = load_pickle(pickle_folder+'shapes.pickle')
@@ -57,21 +142,11 @@ def get_histology_segmentation(prefix, save_folder,
     
     # load in histology features
     print('Loading histology feature embeddings...')
-    he_embed_total = []
     if len(cache_path) > 0:
         cache_path = cache_path
     else:
         cache_path = pickle_folder
-    i = 0
-    while 1 > 0:
-        if os.path.exists(cache_path+foundation_model+f'_embeddings_downsamp_{down_samp_step}_part_{i}.pickle'):
-            he_embed_part = load_pickle(cache_path+foundation_model+f'_embeddings_downsamp_{down_samp_step}_part_{i}.pickle')
-            he_embed_total.append(he_embed_part)
-            i += 1
-        else:
-            break
-    he_embed_total = np.concatenate(he_embed_total)
-    del he_embed_part
+    he_embed_total = _load_embedding_parts(cache_path, foundation_model, down_samp_step)
     print('Sucessfully loaded and normalized all histology feature embeddings!')
 
     # define color palette
@@ -95,9 +170,18 @@ def get_histology_segmentation(prefix, save_folder,
     # PCA+kmeans to cluster the superpixels into morphology clusters
     he_embed_qc = he_embed_total[qc_mask[down_samp_mask]]
     del he_embed_total
-    pca_encoder = PCA(n_components=80)
-    pca_encoder.fit(he_embed_qc)
-    he_embed_qc_pca = pca_encoder.fit_transform(he_embed_qc)
+    if pca_encoder is None and len(pca_model_path) > 0:
+        pca_encoder = load_pickle(pca_model_path)
+        print(f'Loaded external PCA model from: {pca_model_path}')
+
+    if pca_encoder is None:
+        pca_encoder = PCA(n_components=80)
+        pca_encoder.fit(he_embed_qc)
+        print('Using per-sample PCA (default behavior).')
+    else:
+        print('Using provided global PCA model.')
+
+    he_embed_qc_pca = pca_encoder.transform(he_embed_qc)
 
     print(f'Start segmenting the histology image, clustering method: {clustering_method}')
     if clustering_method == 'kmeans':
