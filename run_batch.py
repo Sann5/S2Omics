@@ -210,30 +210,6 @@ def parse_args():
         choices=[1, 2, 3, 4, 5],
         help="Last pipeline step to execute (1-5).",
     )
-    parser.add_argument(
-        "--clean-before-steps",
-        type=int,
-        nargs="+",
-        default=[],
-        help=(
-            "Step numbers whose previous outputs should be removed before execution. "
-            "Example: --clean-before-steps 4 5"
-        ),
-    )
-    parser.add_argument(
-        "--cleanup-only",
-        action="store_true",
-        help="Only cleanup selected step outputs and exit.",
-    )
-    parser.add_argument(
-        "--cleanup-steps",
-        type=int,
-        nargs="+",
-        default=None,
-        help=(
-            "Steps to cleanup when --cleanup-only is set. Defaults to selected run steps."
-        ),
-    )
     return parser.parse_args()
 
 
@@ -344,87 +320,52 @@ def should_run_step(args, step):
     return args.start_step <= step <= args.end_step
 
 
-def cleanup_sample_outputs(sample_out_dir, steps, foundation_model, down_samp_step):
+def reset_step123_outputs(sample_out_dir, step, foundation_model, down_samp_step):
+    sample_path = Path(sample_out_dir)
+    s2_out = sample_path / "S2Omics_output"
+    pickle_dir = s2_out / "pickle_files"
+
+    if step == 1:
+        for rel in ["he.tiff", "he-scaled.tiff", "he.jpg", "he-scaled.jpg"]:
+            target = sample_path / rel
+            if target.exists():
+                target.unlink()
+    elif step == 2:
+        for rel in ["shapes.pickle", "qc_preserve_indicator.pickle"]:
+            target = pickle_dir / rel
+            if target.exists():
+                target.unlink()
+    elif step == 3:
+        target = pickle_dir / "num_patches.pickle"
+        if target.exists():
+            target.unlink()
+        for emb in pickle_dir.glob(
+            f"{foundation_model}_embeddings_downsamp_{down_samp_step}_part_*.pickle"
+        ):
+            emb.unlink()
+
+
+def reset_step45_outputs(sample_out_dir, step):
     sample_path = Path(sample_out_dir)
     s2_out = sample_path / "S2Omics_output"
     image_dir = s2_out / "image_files"
     pickle_dir = s2_out / "pickle_files"
-    
-    deleted_count = 0
 
-    for step in sorted(set(steps)):
-        try:
-            if step == 1:
-                for rel in ["he.tiff", "he-scaled.tiff", "he.jpg", "he-scaled.jpg"]:
-                    target = sample_path / rel
-                    if target.exists():
-                        target.unlink()
-                        deleted_count += 1
-            elif step == 2:
-                if pickle_dir.exists():
-                    for rel in ["shapes.pickle", "qc_preserve_indicator.pickle"]:
-                        target = pickle_dir / rel
-                        if target.exists():
-                            target.unlink()
-                            deleted_count += 1
-            elif step == 3:
-                if pickle_dir.exists():
-                    target = pickle_dir / "num_patches.pickle"
-                    if target.exists():
-                        target.unlink()
-                        deleted_count += 1
-                    for emb in pickle_dir.glob(
-                        f"{foundation_model}_embeddings_downsamp_{down_samp_step}_part_*.pickle"
-                    ):
-                        emb.unlink()
-                        deleted_count += 1
-            elif step == 4:
-                if pickle_dir.exists():
-                    for rel in ["cluster_image.pickle", "linkage_matrix.pickle", "clustering_metrics.pickle"]:
-                        target = pickle_dir / rel
-                        if target.exists():
-                            target.unlink()
-                            deleted_count += 1
-                if image_dir.exists():
-                    for pattern in [
-                        "cluster_image_num_clusters_*.jpg",
-                        "cluster_image_num_clusters_*.jpeg",
-                        "cluster_image_num_clusters_*.tif",
-                        "cluster_image_num_clusters_*.tiff",
-                    ]:
-                        for image in image_dir.glob(pattern):
-                            image.unlink()
-                            deleted_count += 1
-            elif step == 5:
-                if pickle_dir.exists():
-                    target = pickle_dir / "adjusted_cluster_image.pickle"
-                    if target.exists():
-                        target.unlink()
-                        deleted_count += 1
-                if image_dir.exists():
-                    for pattern in [
-                        "adjusted_cluster_image_num_clusters_*.jpg",
-                        "adjusted_cluster_image_num_clusters_*.jpeg",
-                        "adjusted_cluster_image_num_clusters_*.tif",
-                        "adjusted_cluster_image_num_clusters_*.tiff",
-                    ]:
-                        for image in image_dir.glob(pattern):
-                            image.unlink()
-                            deleted_count += 1
-        except Exception as e:
-            print(f"[WARN] Cleanup failed for step {step}: {e}")
-    
-    if deleted_count == 0:
-        print(f"[WARN] No files deleted for steps {steps} in {sample_out_dir}")
-
-
-def cleanup_global_pca_models(work_dir):
-    removed = 0
-    for model_path in Path(work_dir).glob("global_pca_*.pickle"):
-        if model_path.is_file():
-            model_path.unlink()
-            removed += 1
-    return removed
+    if step == 4:
+        for rel in ["cluster_image.pickle", "linkage_matrix.pickle", "clustering_metrics.pickle"]:
+            target = pickle_dir / rel
+            if target.exists():
+                target.unlink()
+        for ext in ["jpg", "jpeg", "tif", "tiff"]:
+            for image in image_dir.glob(f"cluster_image_num_clusters_*.{ext}"):
+                image.unlink()
+    elif step == 5:
+        target = pickle_dir / "adjusted_cluster_image.pickle"
+        if target.exists():
+            target.unlink()
+        for ext in ["jpg", "jpeg", "tif", "tiff"]:
+            for image in image_dir.glob(f"adjusted_cluster_image_num_clusters_*.{ext}"):
+                image.unlink()
 
 
 def already_finished(sample_out_dir, foundation_model, down_samp_step):
@@ -454,13 +395,13 @@ def process_one(ndpi_path, args):
     save_folder = os.path.join(sample_out_dir, "S2Omics_output")
 
     if should_run_step(args, 1):
-        if 1 in args.clean_before_steps:
-            cleanup_sample_outputs(
-                sample_out_dir,
-                [1],
-                args.foundation_model,
-                args.down_samp_step,
-            )
+        # Overwrite mode: remove previous step-1 artifacts before regenerating.
+        reset_step123_outputs(
+            sample_out_dir,
+            1,
+            args.foundation_model,
+            args.down_samp_step,
+        )
 
         # Convert NDPI into he-raw.tiff and pixel-size-raw.txt in sample folder.
         convert_ndpi_with_fallback(
@@ -473,25 +414,25 @@ def process_one(ndpi_path, args):
         histology_preprocess(prefix, show_image=args.show_image)
 
     if should_run_step(args, 2):
-        if 2 in args.clean_before_steps:
-            cleanup_sample_outputs(
-                sample_out_dir,
-                [2],
-                args.foundation_model,
-                args.down_samp_step,
-            )
+        # Overwrite mode: remove previous step-2 artifacts before regenerating.
+        reset_step123_outputs(
+            sample_out_dir,
+            2,
+            args.foundation_model,
+            args.down_samp_step,
+        )
 
         # Step 2
         superpixel_quality_control(prefix, save_folder, show_image=args.show_image)
 
     if should_run_step(args, 3):
-        if 3 in args.clean_before_steps:
-            cleanup_sample_outputs(
-                sample_out_dir,
-                [3],
-                args.foundation_model,
-                args.down_samp_step,
-            )
+        # Overwrite mode: remove previous step-3 artifacts before regenerating.
+        reset_step123_outputs(
+            sample_out_dir,
+            3,
+            args.foundation_model,
+            args.down_samp_step,
+        )
 
         # Step 3
         histology_feature_extraction(
@@ -506,13 +447,8 @@ def process_one(ndpi_path, args):
         )
 
     if should_run_step(args, 4):
-        if 4 in args.clean_before_steps:
-            cleanup_sample_outputs(
-                sample_out_dir,
-                [4],
-                args.foundation_model,
-                args.down_samp_step,
-            )
+        # Overwrite mode: remove previous step-4 artifacts before regenerating.
+        reset_step45_outputs(sample_out_dir, 4)
 
         # Step 4
         get_histology_segmentation(
@@ -527,13 +463,8 @@ def process_one(ndpi_path, args):
         )
 
     if should_run_step(args, 5):
-        if 5 in args.clean_before_steps:
-            cleanup_sample_outputs(
-                sample_out_dir,
-                [5],
-                args.foundation_model,
-                args.down_samp_step,
-            )
+        # Overwrite mode: remove previous step-5 artifacts before regenerating.
+        reset_step45_outputs(sample_out_dir, 5)
 
         # Step 5
         merge_over_clusters(
@@ -553,13 +484,10 @@ def process_one_step45(sample_dir, args, pca_encoder=None):
     print(f"[START] {sample_name}")
 
     if should_run_step(args, 4):
-        if 4 in args.clean_before_steps:
-            cleanup_sample_outputs(
-                sample_dir,
-                [4],
-                args.foundation_model,
-                args.down_samp_step,
-            )
+        # Overwrite mode: remove previous step-4 artifacts before regenerating.
+        reset_step45_outputs(sample_dir, 4)
+
+        pca_model_path = args.global_pca_model_path if args.pca_mode == "global" else ""
 
         get_histology_segmentation(
             prefix,
@@ -571,17 +499,12 @@ def process_one_step45(sample_dir, args, pca_encoder=None):
             resolution=args.resolution,
             if_evaluate=args.if_evaluate,
             pca_encoder=pca_encoder,
-            pca_model_path=args.global_pca_model_path or "",
+            pca_model_path=pca_model_path or "",
         )
 
     if should_run_step(args, 5):
-        if 5 in args.clean_before_steps:
-            cleanup_sample_outputs(
-                sample_dir,
-                [5],
-                args.foundation_model,
-                args.down_samp_step,
-            )
+        # Overwrite mode: remove previous step-5 artifacts before regenerating.
+        reset_step45_outputs(sample_dir, 5)
 
         merge_over_clusters(
             prefix,
@@ -598,16 +521,10 @@ def main():
     if args.start_step > args.end_step:
         raise ValueError("--start-step must be <= --end-step.")
 
-    if not all(step in [1, 2, 3, 4, 5] for step in args.clean_before_steps):
-        raise ValueError("--clean-before-steps supports only step numbers 1..5")
-
     # Determine if running steps 4-5 only (no input NDPI files needed)
     step45_only = args.start_step >= 4
 
-    # For cleanup-only, always use existing sample dirs (don't need input files)
-    if args.cleanup_only:
-        files = collect_existing_sample_dirs(args, require_step45_files=False)
-    elif step45_only:
+    if step45_only:
         files = collect_existing_sample_dirs(args, require_step45_files=True)
     else:
         files = collect_inputs(args)
@@ -624,45 +541,17 @@ def main():
     print(f"Total assigned files: {len(files)}")
     print(f"Output base directory: {os.path.abspath(args.work_dir)}")
     print(f"Foundation model: {args.foundation_model}")
-    if not step45_only and not args.cleanup_only:
+    if not step45_only:
         print(f"Device: {args.device}")
     print(f"Run steps: {args.start_step} -> {args.end_step}")
-    print(f"Clean-before-steps: {sorted(set(args.clean_before_steps))}")
     if step45_only:
         print("Mode: step 4-5 only (existing samples)")
         print(f"PCA mode: {args.pca_mode}")
-
-    if args.cleanup_only:
-        cleanup_steps = args.cleanup_steps
-        if cleanup_steps is None:
-            cleanup_steps = list(range(args.start_step, args.end_step + 1))
-        cleanup_steps = sorted(set(cleanup_steps))
-        if not all(step in [1, 2, 3, 4, 5] for step in cleanup_steps):
-            raise ValueError("--cleanup-steps supports only step numbers 1..5")
-
-        print(f"Cleanup-only mode. Steps to clean: {cleanup_steps}")
-
-        for item in files:
-            # In cleanup-only or step45-only, items are already full sample directory paths
-            # Otherwise, items are NDPI file paths and need to be converted
-            sample_out_dir = item if (args.cleanup_only or step45_only) else os.path.join(args.work_dir, Path(item).stem)
-            print(f"[INFO] Cleaning: {sample_out_dir}")
-            cleanup_sample_outputs(
-                sample_out_dir,
-                cleanup_steps,
-                args.foundation_model,
-                args.down_samp_step,
+        if args.pca_mode != "global" and args.global_pca_model_path:
+            print(
+                "[WARN] --global-pca-model-path is provided but ignored because "
+                "--pca-mode is not 'global'."
             )
-            print(f"[CLEANED] {sample_out_dir}")
-
-        # Automatically remove global PCA model if cleaning step 4
-        if 4 in cleanup_steps:
-            removed = cleanup_global_pca_models(args.work_dir)
-            if removed > 0:
-                print(f"Removed {removed} global PCA model file(s) (step 4 cleanup)")
-
-        print("Cleanup finished.")
-        return
 
     pca_encoder = None
     if step45_only and args.pca_mode == "global" and should_run_step(args, 4):

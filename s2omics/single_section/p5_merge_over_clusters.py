@@ -123,3 +123,11 @@ def merge_over_clusters(prefix, save_folder,
         )
         plt.close(fig)
         print(f'Adjusted segmentation image is stored at: {output_path} (dpi={output_dpi})')
+    else:
+        # If there are no over-clusters, persist a fresh adjusted output identical to step-4 output.
+        adjusted_cluster_image = cluster_image.copy()
+        save_pickle(adjusted_cluster_image, pickle_folder+'adjusted_cluster_image.pickle')
+        print(
+            f'No over-clusters detected ({num_histology_clusters} <= {target_n_clusters}); '
+            'saved adjusted_cluster_image.pickle identical to cluster_image.'
+        )

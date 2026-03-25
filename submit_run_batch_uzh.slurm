@@ -33,10 +33,6 @@ TARGET_LEVEL=0
 START_STEP=4
 END_STEP=5
 
-# Steps to clean previous outputs before execution (leave empty for none)
-# Example: CLEAN_BEFORE_STEPS=(4 5) will remove step 4 and 5 outputs before running
-CLEAN_BEFORE_STEPS=(4 5)
-
 # === STEP 4/5 SPECIFIC SETTINGS ===
 CLUSTERING_METHOD="kmeans"
 N_CLUSTERS=20
@@ -46,7 +42,7 @@ N_PCA_COMPONENTS=80
 
 # === GLOBAL PCA SETTINGS (only applies if step 4 is in the execution range) ===
 # Set PCA_MODE to "per-sample" (default) or "global" (fit across multiple samples)
-PCA_MODE="global"
+PCA_MODE="per-sample"
 GLOBAL_PCA_MODEL_PATH="${WORK_DIR}/global_pca_${FOUNDATION_MODEL}_downsamp_${DOWN_SAMP_STEP}.pickle"
 
 # === SAMPLE DISCOVERY SETTINGS ===
@@ -98,7 +94,6 @@ fi
 if [[ ${START_STEP} -le 1 && ${END_STEP} -ge 1 ]]; then
   echo "  - Step 1: Histology preprocessing"
 fi
-echo "Clean before steps: ${CLEAN_BEFORE_STEPS[*]:-none}"
 echo "Output directory: ${WORK_DIR}"
 echo "=========================================="
 echo ""
@@ -120,7 +115,6 @@ python -u run_batch.py \
   --target-n-clusters "${TARGET_N_CLUSTERS}" \
   --start-step "${START_STEP}" \
   --end-step "${END_STEP}" \
-  --clean-before-steps "${CLEAN_BEFORE_STEPS[@]}" \
   --num-workers "${NUM_WORKERS}" \
   --task-id "${TASK_ID}" \
   --num-tasks "${NUM_TASKS}" \
