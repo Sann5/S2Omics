@@ -261,3 +261,83 @@ def get_histology_segmentation(prefix, save_folder,
     )
     plt.close(fig)
     print(f'Segmentation image is stored at: {output_path} (dpi={output_dpi})')
+
+
+def summarize_clusters(
+    save_folder_list,
+    patient_ids,
+    output_path,
+    patch_size=16,
+    pixel_size=0.5,
+):
+    '''
+    Summarize cluster frequency and density for each patient.
+
+    For every patient the function loads the cluster_image produced by
+    get_histology_segmentation and computes:
+      - cluster frequency: fraction of tissue superpixels in each cluster
+      - cluster density:   count of superpixels in each cluster divided by
+                           total tissue area (in µm²)
+
+    The result is a CSV table with one row per patient, ready for Cox
+    proportional hazard models.
+
+    Parameters:
+        save_folder_list: list of per-patient S2Omics output folders
+        patient_ids:      list of patient identifiers (same length)
+        output_path:      path to save the output CSV
+        patch_size:       superpixel tile size in pixels (default 16)
+        pixel_size:       physical size of one pixel in µm (default 0.5)
+    '''
+    if len(save_folder_list) != len(patient_ids):
+        raise ValueError(
+            f'save_folder_list ({len(save_folder_list)}) and patient_ids '
+            f'({len(patient_ids)}) must have the same length.'
+        )
+
+    superpixel_area_um2 = (patch_size * pixel_size) ** 2  # area of one superpixel
+
+    records = []
+    for save_folder, pid in zip(save_folder_list, patient_ids):
+        save_folder = _normalize_save_folder(save_folder)
+        pickle_folder = save_folder + 'pickle_files/'
+
+        cluster_image = load_pickle(pickle_folder + 'cluster_image.pickle')
+
+        # tissue superpixels are those with cluster label >= 0
+        tissue_mask = cluster_image >= 0
+        n_tissue = int(tissue_mask.sum())
+        tissue_area_um2 = n_tissue * superpixel_area_um2
+
+        # unique cluster labels (excluding background = -1)
+        cluster_labels = cluster_image[tissue_mask].astype(int)
+        unique_clusters = np.unique(cluster_labels)
+
+        row = {
+            'patient_id': pid,
+            'tissue_area_um2': tissue_area_um2,
+            'n_tissue_superpixels': n_tissue,
+        }
+
+        for k in unique_clusters:
+            count_k = int((cluster_labels == k).sum())
+            row[f'freq_cluster_{k}'] = count_k / n_tissue if n_tissue > 0 else 0.0
+            row[f'density_cluster_{k}'] = count_k / tissue_area_um2 if tissue_area_um2 > 0 else 0.0
+
+        records.append(row)
+
+    df = pd.DataFrame(records)
+    # fill missing clusters (when patients have different cluster sets) with 0
+    df = df.fillna(0.0)
+    # sort columns: patient_id, area, n_tissue, then freq_*, then density_*
+    meta_cols = ['patient_id', 'tissue_area_um2', 'n_tissue_superpixels']
+    freq_cols = sorted([c for c in df.columns if c.startswith('freq_cluster_')])
+    density_cols = sorted([c for c in df.columns if c.startswith('density_cluster_')])
+    df = df[meta_cols + freq_cols + density_cols]
+
+    os.makedirs(os.path.dirname(output_path) if os.path.dirname(output_path) else '.', exist_ok=True)
+    df.to_csv(output_path, index=False)
+    print(f'Cluster summary saved to: {output_path}')
+    print(f'  Patients: {len(df)}')
+    print(f'  Clusters: {len(freq_cols)}')
+    return df

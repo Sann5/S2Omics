@@ -15,6 +15,7 @@ from s2omics.p0_ndpi_conversion import convert_ndpi_with_fallback
 from s2omics.single_section.p4_get_histology_segmentation import (
     fit_global_pca_for_samples,
     get_histology_segmentation,
+    summarize_clusters,
 )
 from s2omics.single_section.p5_merge_over_clusters import merge_over_clusters
 
@@ -209,6 +210,36 @@ def parse_args():
         default=5,
         choices=[1, 2, 3, 4, 5],
         help="Last pipeline step to execute (1-5).",
+    )
+    parser.add_argument(
+        "--cluster-summary-path",
+        type=str,
+        default=None,
+        help=(
+            "Path for the cluster summary CSV output. "
+            "If omitted, defaults to <work-dir>/cluster_summary.csv. "
+            "Set to empty string to disable."
+        ),
+    )
+    parser.add_argument(
+        "--patch-size",
+        type=int,
+        default=16,
+        help="Superpixel tile size in pixels (default 16).",
+    )
+    parser.add_argument(
+        "--pixel-size",
+        type=float,
+        default=0.5,
+        help="Physical size of one pixel in µm (default 0.5).",
+    )
+    parser.add_argument(
+        "--summarize-only",
+        action="store_true",
+        help=(
+            "Skip all per-sample pipeline steps and only run cluster summarization. "
+            "Requires --work-dir with existing samples that have cluster_image.pickle."
+        ),
     )
     return parser.parse_args()
 
@@ -515,8 +546,55 @@ def process_one_step45(sample_dir, args, pca_encoder=None):
     print(f"[DONE]  {sample_name}")
 
 
+def _collect_summarizable_dirs(work_dir, candidate_dirs=None):
+    """Return sample dirs under work_dir that have cluster_image.pickle."""
+    work = Path(work_dir).resolve()
+    if not work.exists():
+        raise FileNotFoundError(f"work-dir does not exist: {work}")
+
+    if candidate_dirs is None:
+        candidate_dirs = [
+            str(child) for child in sorted(work.iterdir()) if child.is_dir()
+        ]
+
+    return [
+        d for d in candidate_dirs
+        if (Path(d) / "S2Omics_output" / "pickle_files" / "cluster_image.pickle").exists()
+    ]
+
+
+def _run_cluster_summary(args, candidate_dirs=None):
+    """Discover samples and run cluster summarization."""
+    valid_dirs = _collect_summarizable_dirs(args.work_dir, candidate_dirs)
+    if not valid_dirs:
+        print("[WARN] No samples with cluster_image.pickle found; skipping summary.")
+        return None
+
+    save_folder_list = [
+        str((Path(d) / "S2Omics_output").resolve()) for d in valid_dirs
+    ]
+    patient_ids = [Path(d).name for d in valid_dirs]
+
+    summary_path = args.cluster_summary_path
+    if summary_path is None:
+        summary_path = os.path.join(args.work_dir, "cluster_summary.csv")
+
+    print(f"Summarizing {len(valid_dirs)} samples...")
+    return summarize_clusters(
+        save_folder_list=save_folder_list,
+        patient_ids=patient_ids,
+        output_path=summary_path,
+        patch_size=args.patch_size,
+        pixel_size=args.pixel_size,
+    )
+
+
 def main():
     args = parse_args()
+
+    if args.summarize_only:
+        _run_cluster_summary(args)
+        return
 
     if args.start_step > args.end_step:
         raise ValueError("--start-step must be <= --end-step.")
@@ -600,6 +678,13 @@ def main():
         print("Failed files:")
         for p in failed:
             print(p)
+
+    # --- Cluster summarization (runs after all samples complete) ---
+    if args.cluster_summary_path != "" and args.end_step >= 4:
+        print("\n--- Cluster Summarization ---")
+        _run_cluster_summary(args, candidate_dirs=files if step45_only else None)
+
+    if failed:
         sys.exit(1)
 
 
