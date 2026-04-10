@@ -1,6 +1,6 @@
-SRC="/scratch/gsolun/S2Omics/outputs"
-DST="/scratch/gsolun/S2Omics/outputs_step45_archive/local_$(date +%Y%m%d_%H%M%S)"
-PREFIX="LUNG-NSCLC2-"
+SRC="/scratch/gsolun/S2Omics/outputs_1"
+DST="/scratch/gsolun/S2Omics/outputs_step45_archive/global_1_$(date +%Y%m%d_%H%M%S)"
+PREFIX=""
 
 
 mkdir -p "$DST"

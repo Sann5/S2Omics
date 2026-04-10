@@ -15,7 +15,6 @@ from s2omics.p0_ndpi_conversion import convert_ndpi_with_fallback
 from s2omics.single_section.p4_get_histology_segmentation import (
     fit_global_pca_for_samples,
     get_histology_segmentation,
-    summarize_clusters,
 )
 from s2omics.single_section.p5_merge_over_clusters import merge_over_clusters
 
@@ -127,11 +126,6 @@ def parse_args():
         help="Show matplotlib previews (usually disabled for clusters).",
     )
     parser.add_argument(
-        "--skip-existing",
-        action="store_true",
-        help="Skip sample if final step-3 output already exists.",
-    )
-    parser.add_argument(
         "--stop-on-error",
         action="store_true",
         help="Abort whole batch when one sample fails.",
@@ -162,15 +156,6 @@ def parse_args():
         help=(
             "Optional sample folder names under --work-dir when using --start-step >= 4. "
             "If omitted, valid sample folders are auto-discovered."
-        ),
-    )
-    parser.add_argument(
-        "--sample-prefix",
-        type=str,
-        default=None,
-        help=(
-            "Optional prefix filter for auto-discovery when using --start-step >= 4, "
-            "e.g. 'LUNG-NSCLC2-'."
         ),
     )
     parser.add_argument(
@@ -212,16 +197,6 @@ def parse_args():
         help="Last pipeline step to execute (1-5).",
     )
     parser.add_argument(
-        "--cluster-summary-path",
-        type=str,
-        default=None,
-        help=(
-            "Path for the cluster summary CSV output. "
-            "If omitted, defaults to <work-dir>/cluster_summary.csv. "
-            "Set to empty string to disable."
-        ),
-    )
-    parser.add_argument(
         "--patch-size",
         type=int,
         default=16,
@@ -232,14 +207,6 @@ def parse_args():
         type=float,
         default=0.5,
         help="Physical size of one pixel in µm (default 0.5).",
-    )
-    parser.add_argument(
-        "--summarize-only",
-        action="store_true",
-        help=(
-            "Skip all per-sample pipeline steps and only run cluster summarization. "
-            "Requires --work-dir with existing samples that have cluster_image.pickle."
-        ),
     )
     return parser.parse_args()
 
@@ -307,8 +274,6 @@ def collect_existing_sample_dirs(args, require_step45_files=True):
         for child in sorted(work_dir.iterdir()):
             if not child.is_dir():
                 continue
-            if args.sample_prefix and not child.name.startswith(args.sample_prefix):
-                continue
             if not (child / "S2Omics_output").exists():
                 continue
             sample_dirs.append(child)
@@ -326,10 +291,26 @@ def collect_existing_sample_dirs(args, require_step45_files=True):
     ]
 
     if not valid:
+        discovered = len(sample_dirs)
+        sample_msg = ""
+        if discovered:
+            first = sample_dirs[0]
+            first_pickle = first / "S2Omics_output" / "pickle_files"
+            expected = [
+                first_pickle / "shapes.pickle",
+                first_pickle / "qc_preserve_indicator.pickle",
+                first_pickle / f"{args.foundation_model}_embeddings_downsamp_{args.down_samp_step}_part_0.pickle",
+            ]
+            missing_names = [p.name for p in expected if not p.exists()]
+            sample_msg = (
+                f" Example sample: {first.name}. "
+                f"Missing there: {', '.join(missing_names) if missing_names else 'unknown mismatch'}."
+            )
         raise ValueError(
             "No valid sample folders found for step45-only mode. "
             "Expected S2Omics_output/pickle_files with shapes.pickle, "
-            "qc_preserve_indicator.pickle and embeddings part_0."
+            "qc_preserve_indicator.pickle and embeddings part_0. "
+            f"Discovered {discovered} sample folder(s) under --work-dir.{sample_msg}"
         )
 
     return valid
@@ -399,26 +380,10 @@ def reset_step45_outputs(sample_out_dir, step):
                 image.unlink()
 
 
-def already_finished(sample_out_dir, foundation_model, down_samp_step):
-    target = (
-        Path(sample_out_dir)
-        / "S2Omics_output"
-        / "pickle_files"
-        / f"{foundation_model}_embeddings_downsamp_{down_samp_step}_part_0.pickle"
-    )
-    return target.exists()
-
-
 def process_one(ndpi_path, args):
     sample_name = Path(ndpi_path).stem
     sample_out_dir = os.path.join(args.work_dir, sample_name)
     os.makedirs(sample_out_dir, exist_ok=True)
-
-    if args.skip_existing and should_run_step(args, 3) and already_finished(
-        sample_out_dir, args.foundation_model, args.down_samp_step
-    ):
-        print(f"[SKIP] {sample_name}: step-3 outputs already found")
-        return
 
     print(f"[START] {sample_name}")
 
@@ -546,55 +511,8 @@ def process_one_step45(sample_dir, args, pca_encoder=None):
     print(f"[DONE]  {sample_name}")
 
 
-def _collect_summarizable_dirs(work_dir, candidate_dirs=None):
-    """Return sample dirs under work_dir that have cluster_image.pickle."""
-    work = Path(work_dir).resolve()
-    if not work.exists():
-        raise FileNotFoundError(f"work-dir does not exist: {work}")
-
-    if candidate_dirs is None:
-        candidate_dirs = [
-            str(child) for child in sorted(work.iterdir()) if child.is_dir()
-        ]
-
-    return [
-        d for d in candidate_dirs
-        if (Path(d) / "S2Omics_output" / "pickle_files" / "cluster_image.pickle").exists()
-    ]
-
-
-def _run_cluster_summary(args, candidate_dirs=None):
-    """Discover samples and run cluster summarization."""
-    valid_dirs = _collect_summarizable_dirs(args.work_dir, candidate_dirs)
-    if not valid_dirs:
-        print("[WARN] No samples with cluster_image.pickle found; skipping summary.")
-        return None
-
-    save_folder_list = [
-        str((Path(d) / "S2Omics_output").resolve()) for d in valid_dirs
-    ]
-    patient_ids = [Path(d).name for d in valid_dirs]
-
-    summary_path = args.cluster_summary_path
-    if summary_path is None:
-        summary_path = os.path.join(args.work_dir, "cluster_summary.csv")
-
-    print(f"Summarizing {len(valid_dirs)} samples...")
-    return summarize_clusters(
-        save_folder_list=save_folder_list,
-        patient_ids=patient_ids,
-        output_path=summary_path,
-        patch_size=args.patch_size,
-        pixel_size=args.pixel_size,
-    )
-
-
 def main():
     args = parse_args()
-
-    if args.summarize_only:
-        _run_cluster_summary(args)
-        return
 
     if args.start_step > args.end_step:
         raise ValueError("--start-step must be <= --end-step.")
@@ -643,7 +561,6 @@ def main():
                 f"global_pca_{args.foundation_model}_downsamp_{args.down_samp_step}.pickle",
             )
             args.global_pca_model_path = pca_path
-
         pca_encoder = fit_global_pca_for_samples(
             save_folder_list=save_folder_list,
             foundation_model=args.foundation_model,
@@ -678,11 +595,6 @@ def main():
         print("Failed files:")
         for p in failed:
             print(p)
-
-    # --- Cluster summarization (runs after all samples complete) ---
-    if args.cluster_summary_path != "" and args.end_step >= 4:
-        print("\n--- Cluster Summarization ---")
-        _run_cluster_summary(args, candidate_dirs=files if step45_only else None)
 
     if failed:
         sys.exit(1)
