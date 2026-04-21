@@ -2,7 +2,7 @@
 #SBATCH --job-name=s2omics_step13_array
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=12
-#SBATCH --mem=512G
+#SBATCH --mem=1024GB
 #SBATCH --time=24:00:00
 #SBATCH --array=0-19%4
 #SBATCH --output=logs/%x_%A_%a.out
@@ -15,28 +15,32 @@ set -euo pipefail
 
 ROOT_DIR="/scratch/gsolun"
 PROJECT_DIR="${ROOT_DIR}/S2Omics"
-INPUT_GLOB="${ROOT_DIR}/Data/rerun/*.ndpi"
+INPUT_GLOB="${ROOT_DIR}/Data/NSCLC1/larges/*.ndpi"
 WORK_DIR="${PROJECT_DIR}/outputs_1"
 
 # Model settings
 FOUNDATION_MODEL="uni"
 CKPT_PATH="${PROJECT_DIR}/checkpoints/uni/"
 DEVICE="cuda:0"
-DOWN_SAMP_STEP=10
+DOWN_SAMP_STEP=7
 BATCH_SIZE=16
 NUM_WORKERS=2
 TARGET_LEVEL=0
 
 # === PIPELINE STEPS TO EXECUTE ===
 # Set START_STEP and END_STEP to define the range of steps to run
-# Options: 1=NDPI conversion, 2=preprocess, 3=feature extraction, 4=segmentation, 5=merge clusters
+# Options: 1=NDPI conversion, 2=preprocess, 3=feature extraction, 4=segmentation
+#
+# IMPORTANT: Step 4 uses JOINT clustering across all samples
+# (global PCA + Harmony + joint KMeans). It MUST be launched in a single
+# non-array job that sees every sample at once. Do NOT extend END_STEP past 3
+# in this array script -- use step45.slurm for step 4 instead.
 START_STEP=1
 END_STEP=3
 
 CLUSTERING_METHOD="kmeans"
 N_CLUSTERS=20
 RESOLUTION=1.0
-TARGET_N_CLUSTERS=15
 
 NUM_TASKS="${SLURM_ARRAY_TASK_COUNT:-20}"
 TASK_ID="${SLURM_ARRAY_TASK_ID:-0}"
@@ -56,9 +60,6 @@ echo "=========================================="
 echo "S2Omics Pipeline Configuration"
 echo "=========================================="
 echo "Steps to execute: ${START_STEP}-${END_STEP}"
-if [[ ${START_STEP} -le 5 && ${END_STEP} -ge 5 ]]; then
-  echo "  - Step 5: Merge over clusters"
-fi
 if [[ ${START_STEP} -le 3 && ${END_STEP} -ge 3 ]]; then
   echo "  - Step 3: Feature extraction (model: ${FOUNDATION_MODEL})"
 fi
@@ -86,7 +87,6 @@ python -u run_batch.py \
   --clustering-method "${CLUSTERING_METHOD}" \
   --n-clusters "${N_CLUSTERS}" \
   --resolution "${RESOLUTION}" \
-  --target-n-clusters "${TARGET_N_CLUSTERS}" \
   --start-step "${START_STEP}" \
   --end-step "${END_STEP}" \
   --num-workers "${NUM_WORKERS}" \

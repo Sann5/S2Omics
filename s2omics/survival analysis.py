@@ -30,6 +30,11 @@ except Exception:
         print(obj)
 
 
+# ─── Utilities ──────────────────────────────────────────────────────────────────
+
+_INVALID_LABELS = {'', 'na', 'nan', 'none', 'unknown', 'not available'}
+
+
 def _find_column(df, candidates):
     lower_map = {column.lower(): column for column in df.columns}
     for candidate in candidates:
@@ -61,6 +66,39 @@ def _normalize_save_folder(save_folder):
     (save_folder / 'image_files').mkdir(parents=True, exist_ok=True)
     (save_folder / 'pickle_files').mkdir(parents=True, exist_ok=True)
     return str(save_folder) + '/'
+
+
+def clean_group_labels(series):
+    cleaned = series.astype(str).str.strip()
+    return cleaned.where(~cleaned.str.lower().isin(_INVALID_LABELS))
+
+
+def get_cluster_feature_columns(df):
+    return [
+        column
+        for column in df.columns
+        if column.startswith('freq_cluster_')
+    ]
+
+
+def _get_endpoint_specs(df):
+    return [
+        {
+            'name': 'PFS',
+            'time_col': _find_column(df, ['PFS_days', 'pfs_days']),
+            'event_col': _find_column(df, ['PFS_censoring', 'pfs_censoring', 'PFS_event', 'pfs_event']),
+            'event_text': '1 = progression event, 0 = censored',
+        },
+        {
+            'name': 'OS',
+            'time_col': _find_column(df, ['OS_days', 'os_days', 'overall_survival_days']),
+            'event_col': _find_column(df, ['OS_censoring', 'os_censoring', 'OS_event', 'os_event', 'censoring']),
+            'event_text': '1 = death event, 0 = censored',
+        },
+    ]
+
+
+# ─── Cluster summarization ──────────────────────────────────────────────────────
 
 
 def discover_save_folders(root_dir, sample_names=None, require_cluster_image=True):
@@ -129,15 +167,13 @@ def summarize_clusters(save_folder_list, patient_ids, output_path, patch_size=16
         for k in unique_clusters:
             count_k = int((cluster_labels == k).sum())
             row[f'freq_cluster_{k}'] = count_k / n_tissue if n_tissue > 0 else 0.0
-            row[f'density_cluster_{k}'] = count_k / tissue_area_um2 if tissue_area_um2 > 0 else 0.0
 
         records.append(row)
 
     df = pd.DataFrame(records).fillna(0.0)
     meta_cols = ['patient_id', 'tissue_area_um2', 'n_tissue_superpixels']
     freq_cols = sorted([c for c in df.columns if c.startswith('freq_cluster_')])
-    density_cols = sorted([c for c in df.columns if c.startswith('density_cluster_')])
-    df = df[meta_cols + freq_cols + density_cols]
+    df = df[meta_cols + freq_cols]
 
     output_dir = os.path.dirname(str(output_path))
     if output_dir:
@@ -160,6 +196,9 @@ def summarize_clusters_from_root(root_dir, output_path, sample_names=None, patch
         patch_size=patch_size,
         pixel_size=pixel_size,
     )
+
+
+# ─── Patient matching & clinical merge ──────────────────────────────────────────
 
 
 def _normalize_patient_id(value):
@@ -260,76 +299,15 @@ def merge_cluster_with_clinical(clinical_path, cluster_summary_path, output_path
     return merged_df
 
 
+# ─── Kaplan-Meier ───────────────────────────────────────────────────────────────
+
+
 def _plot_km(time_values, event_values, label, ax):
     sf = SurvfuncRight(time_values, event_values)
     ax.step(sf.surv_times, sf.surv_prob, where='post', label=label)
 
 
-def _plot_grouped_km_by_treatment(df, time_col, event_col, treatment_col, title, min_group_n=10):
-    if treatment_col is None:
-        print(f'[{title}] Skipped: Broad_treatment column not found.')
-        return None
-
-    km_df = df[[time_col, event_col, treatment_col]].copy()
-    km_df[time_col] = pd.to_numeric(km_df[time_col], errors='coerce')
-    km_df[event_col] = _normalize_event_binary(km_df[event_col])
-    km_df[treatment_col] = km_df[treatment_col].astype(str).str.strip()
-
-    invalid_labels = {'', 'na', 'nan', 'none', 'unknown'}
-    km_df = km_df.dropna(subset=[time_col, event_col, treatment_col])
-    km_df = km_df[km_df[time_col] >= 0]
-    km_df = km_df[~km_df[treatment_col].str.lower().isin(invalid_labels)]
-
-    counts = km_df[treatment_col].value_counts()
-    valid_groups = counts[counts >= min_group_n].index.tolist()
-
-    if len(valid_groups) < 2:
-        print(f'[{title}] Skipped: fewer than 2 Broad_treatment groups with at least {min_group_n} samples.')
-        if not counts.empty:
-            print('Observed groups and counts:')
-            print(counts.to_string())
-        return None
-
-    km_df = km_df[km_df[treatment_col].isin(valid_groups)].copy()
-
-    chi2_stat, p_value = survdiff(
-        km_df[time_col].to_numpy(),
-        km_df[event_col].to_numpy(),
-        km_df[treatment_col].to_numpy(),
-    )
-
-    fig, ax = plt.subplots(figsize=(10, 6.5))
-    for group in valid_groups:
-        subset = km_df[km_df[treatment_col] == group]
-        _plot_km(
-            time_values=subset[time_col].to_numpy(),
-            event_values=subset[event_col].to_numpy(),
-            label=f'{group} (n={len(subset)})',
-            ax=ax,
-        )
-
-    ax.set_title(f'{title}\nLog-rank p = {p_value:.4g}, chi2 = {chi2_stat:.3f}')
-    ax.set_xlabel('Time (days)')
-    ax.set_ylabel('Survival probability')
-    ax.set_ylim(0.0, 1.0)
-    ax.grid(alpha=0.25)
-    ax.legend(loc='best', frameon=False)
-    plt.tight_layout()
-    plt.show()
-
-    print(f'[{title}] Log-rank test: chi2={chi2_stat:.4f}, p={p_value:.6g}')
-    print(f'[{title}] Groups used (n >= {min_group_n}):')
-    print(km_df[treatment_col].value_counts().to_string())
-
-    return {
-        'chi2': float(chi2_stat),
-        'p_value': float(p_value),
-        'n_groups': int(len(valid_groups)),
-        'n_rows': int(len(km_df)),
-    }
-
-
-def _plot_legacy_grouped_km(df, time_col, event_col, group_col, title, min_group_n=10):
+def _plot_grouped_km(df, time_col, event_col, group_col, title, min_group_n=10, figsize=(10, 6.5)):
     if group_col is None:
         print(f'[{title}] Skipped: grouping column not found.')
         return None
@@ -337,12 +315,9 @@ def _plot_legacy_grouped_km(df, time_col, event_col, group_col, title, min_group
     km_df = df[[time_col, event_col, group_col]].copy()
     km_df[time_col] = pd.to_numeric(km_df[time_col], errors='coerce')
     km_df[event_col] = _normalize_event_binary(km_df[event_col])
-    km_df[group_col] = km_df[group_col].astype(str).str.strip()
+    km_df[group_col] = clean_group_labels(km_df[group_col])
     km_df = km_df.dropna(subset=[time_col, event_col, group_col])
     km_df = km_df[km_df[time_col] >= 0]
-
-    invalid_labels = {'', 'na', 'nan', 'none', 'unknown'}
-    km_df = km_df[~km_df[group_col].str.lower().isin(invalid_labels)]
 
     counts = km_df[group_col].value_counts()
     valid_groups = counts[counts >= min_group_n].index.tolist()
@@ -362,7 +337,7 @@ def _plot_legacy_grouped_km(df, time_col, event_col, group_col, title, min_group
         km_df[group_col].to_numpy(),
     )
 
-    fig, ax = plt.subplots(figsize=(9, 6))
+    fig, ax = plt.subplots(figsize=figsize)
     for group in valid_groups:
         subset = km_df[km_df[group_col] == group]
         _plot_km(
@@ -402,20 +377,7 @@ def run_km_analyses(merged_df, min_group_n=10):
     if broad_treatment_col is None:
         raise ValueError('Could not find Broad_treatment column required for KM subgroup plots.')
 
-    endpoint_specs = [
-        {
-            'name': 'PFS',
-            'time_col': _find_column(merged_df, ['PFS_days', 'pfs_days']),
-            'event_col': _find_column(merged_df, ['PFS_censoring', 'pfs_censoring', 'PFS_event', 'pfs_event']),
-            'event_text': '1 = progression event, 0 = censored',
-        },
-        {
-            'name': 'OS',
-            'time_col': _find_column(merged_df, ['OS_days', 'os_days', 'overall_survival_days']),
-            'event_col': _find_column(merged_df, ['OS_censoring', 'os_censoring', 'OS_event', 'os_event', 'censoring']),
-            'event_text': '1 = death event, 0 = censored',
-        },
-    ]
+    endpoint_specs = _get_endpoint_specs(merged_df)
 
     km_results = {}
     for endpoint in endpoint_specs:
@@ -433,11 +395,11 @@ def run_km_analyses(merged_df, min_group_n=10):
             print(f'[{endpoint_name}] Skipped: required time/event columns not found.')
             continue
 
-        stats_out = _plot_grouped_km_by_treatment(
+        stats_out = _plot_grouped_km(
             df=merged_df,
             time_col=time_col,
             event_col=event_col,
-            treatment_col=broad_treatment_col,
+            group_col=broad_treatment_col,
             title=f'Kaplan-Meier by Broad_treatment ({endpoint_name})',
             min_group_n=min_group_n,
         )
@@ -460,29 +422,17 @@ def run_km_analyses(merged_df, min_group_n=10):
         stage_col = _find_column(merged_df, ['Stage', 'stage', 'Clinical_stage', 'clinical_stage'])
         smoking_col = _find_column(merged_df, ['Smoking', 'smoking', 'smoking_status', 'Smoking_status'])
 
-        legacy_os_stats['Histology'] = _plot_legacy_grouped_km(
-            merged_df,
-            os_time_col,
-            os_event_col,
-            histology_col,
-            'Kaplan-Meier by Histology (OS)',
-            min_group_n=min_group_n,
+        legacy_os_stats['Histology'] = _plot_grouped_km(
+            merged_df, os_time_col, os_event_col, histology_col,
+            'Kaplan-Meier by Histology (OS)', min_group_n=min_group_n, figsize=(9, 6),
         )
-        legacy_os_stats['Stage'] = _plot_legacy_grouped_km(
-            merged_df,
-            os_time_col,
-            os_event_col,
-            stage_col,
-            'Kaplan-Meier by Stage (OS)',
-            min_group_n=min_group_n,
+        legacy_os_stats['Stage'] = _plot_grouped_km(
+            merged_df, os_time_col, os_event_col, stage_col,
+            'Kaplan-Meier by Stage (OS)', min_group_n=min_group_n, figsize=(9, 6),
         )
-        legacy_os_stats['Smoking'] = _plot_legacy_grouped_km(
-            merged_df,
-            os_time_col,
-            os_event_col,
-            smoking_col,
-            'Kaplan-Meier by Smoking (OS)',
-            min_group_n=min_group_n,
+        legacy_os_stats['Smoking'] = _plot_grouped_km(
+            merged_df, os_time_col, os_event_col, smoking_col,
+            'Kaplan-Meier by Smoking (OS)', min_group_n=min_group_n, figsize=(9, 6),
         )
 
     print('')
@@ -495,12 +445,11 @@ def run_km_analyses(merged_df, min_group_n=10):
     return km_results, legacy_os_stats
 
 
+# ─── Cox design & fitting ──────────────────────────────────────────────────────
+
+
 def _prepare_cox_design(df, time_col, event_col, corr_threshold=0.95):
-    cluster_cols = [
-        column
-        for column in df.columns
-        if column.startswith('freq_cluster_') or column.startswith('density_cluster_')
-    ]
+    cluster_cols = get_cluster_feature_columns(df)
 
     categorical_candidates = [
         ['Histology', 'histology'],
@@ -556,14 +505,17 @@ def _prepare_cox_design(df, time_col, event_col, corr_threshold=0.95):
         upper = corr_matrix.where(np.triu(np.ones(corr_matrix.shape), k=1).astype(bool))
         to_drop = [col for col in upper.columns if (upper[col] > corr_threshold).any()]
         if to_drop:
-            design_df = design_df.drop(columns=to_drop)
             print(
                 f'[Cox design] Dropped {len(to_drop)} highly correlated features '
                 f'(threshold={corr_threshold}).'
             )
-            print('[Cox design] Removed features:')
+            print('[Cox design] Correlated pairs removed:')
             for feature_name in to_drop:
-                print(f'  - {feature_name}')
+                correlated_with = upper.index[upper[feature_name] > corr_threshold].tolist()
+                for partner in correlated_with:
+                    corr_val = corr_matrix.loc[partner, feature_name]
+                    print(f'  - {feature_name}  <->  {partner}  (r={corr_val:.4f})')
+            design_df = design_df.drop(columns=to_drop)
 
     design_df = (design_df - design_df.mean(axis=0)) / design_df.std(axis=0)
     design_df = design_df.replace([np.inf, -np.inf], np.nan).dropna(axis=1)
@@ -628,22 +580,10 @@ def run_cox_models_by_treatment(merged_df, min_subgroup_n=20, corr_threshold=0.9
     if broad_treatment_col is None:
         raise ValueError('Could not find Broad_treatment column for subgroup analysis.')
 
-    endpoint_specs = [
-        {
-            'name': 'PFS',
-            'time_col': _find_column(merged_df, ['PFS_days', 'pfs_days']),
-            'event_col': _find_column(merged_df, ['PFS_censoring', 'pfs_censoring', 'PFS_event', 'pfs_event']),
-        },
-        {
-            'name': 'OS',
-            'time_col': _find_column(merged_df, ['OS_days', 'os_days', 'overall_survival_days']),
-            'event_col': _find_column(merged_df, ['OS_censoring', 'os_censoring', 'OS_event', 'os_event', 'censoring']),
-        },
-    ]
+    endpoint_specs = _get_endpoint_specs(merged_df)
 
-    clean_treatment = merged_df[broad_treatment_col].astype(str).str.strip()
-    valid_mask = ~clean_treatment.str.lower().isin({'', 'na', 'nan', 'none', 'unknown'})
-    treatment_counts = clean_treatment[valid_mask].value_counts()
+    clean_treatment = clean_group_labels(merged_df[broad_treatment_col])
+    treatment_counts = clean_treatment.dropna().value_counts()
     valid_treatments = treatment_counts[treatment_counts >= min_subgroup_n].index.tolist()
 
     if len(valid_treatments) == 0:
@@ -749,18 +689,7 @@ def run_cox_models_by_treatment(merged_df, min_subgroup_n=20, corr_threshold=0.9
     return cox_run_registry, cox_overview_df
 
 
-def clean_group_labels(series):
-    cleaned = series.astype(str).str.strip()
-    invalid = {'', 'na', 'nan', 'none', 'unknown', 'not available'}
-    return cleaned.where(~cleaned.str.lower().isin(invalid))
-
-
-def get_cluster_feature_columns(df):
-    return [
-        column
-        for column in df.columns
-        if column.startswith('freq_cluster_') or column.startswith('density_cluster_')
-    ]
+# ─── Clinical comparisons ──────────────────────────────────────────────────────
 
 
 def compare_cluster_features_by_group(df, group_col, title, cluster_cols, min_group_n=5, top_n_features=6):
@@ -846,6 +775,9 @@ def compare_cluster_features_by_group(df, group_col, title, cluster_cols, min_gr
         'plotted_features': plottable_features,
         'n_features': len(plottable_features),
     }
+
+
+# ─── Cox diagnostics ──────────────────────────────────────────────────────────
 
 
 def harrell_c_index(time, event, risk_score):
@@ -1053,6 +985,69 @@ def run_cox_diagnostics(cox_run_registry, max_plots=8):
     return diagnostics_df, best_models
 
 
+# ─── Univariate Cox ──────────────────────────────────────────────────────────
+
+
+def _fit_univariate_cox(cox_df, time_col, event_col, feature_name):
+    """Fit a single-feature Cox PH model and return a result dict."""
+    local = cox_df[[time_col, event_col, feature_name]].dropna().copy()
+
+    if local.empty or local[feature_name].nunique(dropna=True) < 2:
+        return {
+            'n_rows': int(len(local)),
+            'uni_coef': np.nan,
+            'uni_hazard_ratio': np.nan,
+            'uni_ci95_low': np.nan,
+            'uni_ci95_high': np.nan,
+            'uni_p_value': np.nan,
+            'uni_log_likelihood': np.nan,
+            'status': 'skipped_low_variance_or_empty',
+        }
+
+    try:
+        model = PHReg(
+            endog=local[time_col].to_numpy(),
+            exog=local[[feature_name]].to_numpy(),
+            status=local[event_col].to_numpy(),
+        )
+        result = model.fit(disp=0)
+
+        beta = float(np.asarray(result.params, dtype=float)[0])
+        bse_arr = getattr(result, 'bse', None)
+        if bse_arr is not None:
+            se = float(np.asarray(bse_arr, dtype=float)[0])
+            ci_low = float(np.exp(beta - 1.96 * se))
+            ci_high = float(np.exp(beta + 1.96 * se))
+        else:
+            ci_low = np.nan
+            ci_high = np.nan
+
+        pvalues_arr = getattr(result, 'pvalues', None)
+        p_value = float(np.asarray(pvalues_arr, dtype=float)[0]) if pvalues_arr is not None else np.nan
+
+        return {
+            'n_rows': int(len(local)),
+            'uni_coef': beta,
+            'uni_hazard_ratio': float(np.exp(beta)),
+            'uni_ci95_low': ci_low,
+            'uni_ci95_high': ci_high,
+            'uni_p_value': p_value,
+            'uni_log_likelihood': _safe_loglike(result),
+            'status': 'ok',
+        }
+    except Exception as exc:
+        return {
+            'n_rows': int(len(local)),
+            'uni_coef': np.nan,
+            'uni_hazard_ratio': np.nan,
+            'uni_ci95_low': np.nan,
+            'uni_ci95_high': np.nan,
+            'uni_p_value': np.nan,
+            'uni_log_likelihood': np.nan,
+            'status': f'failed: {exc}',
+        }
+
+
 def run_univariate_cox_for_lasso_selected(cox_run_registry, coef_threshold=1e-8):
     if not cox_run_registry:
         print('No successful Cox runs available for univariate follow-up.')
@@ -1086,78 +1081,14 @@ def run_univariate_cox_for_lasso_selected(cox_run_registry, coef_threshold=1e-8)
             continue
 
         for feature_name, feature_row in selected.iterrows():
-            local = cox_df[[time_col, event_col, feature_name]].dropna().copy()
-
-            if local.empty or local[feature_name].nunique(dropna=True) < 2:
-                rows.append({
-                    'endpoint': endpoint_name,
-                    'broad_treatment': treatment_name,
-                    'feature': feature_name,
-                    'lasso_coef': float(feature_row['coef']),
-                    'n_rows': int(len(local)),
-                    'uni_coef': np.nan,
-                    'uni_hazard_ratio': np.nan,
-                    'uni_ci95_low': np.nan,
-                    'uni_ci95_high': np.nan,
-                    'uni_p_value': np.nan,
-                    'uni_log_likelihood': np.nan,
-                    'status': 'skipped_low_variance_or_empty',
-                })
-                continue
-
-            try:
-                model = PHReg(
-                    endog=local[time_col].to_numpy(),
-                    exog=local[[feature_name]].to_numpy(),
-                    status=local[event_col].to_numpy(),
-                )
-                result = model.fit(disp=0)
-
-                beta = float(np.asarray(result.params, dtype=float)[0])
-                bse_arr = getattr(result, 'bse', None)
-                if bse_arr is not None:
-                    se = float(np.asarray(bse_arr, dtype=float)[0])
-                    ci_low = float(np.exp(beta - 1.96 * se))
-                    ci_high = float(np.exp(beta + 1.96 * se))
-                else:
-                    ci_low = np.nan
-                    ci_high = np.nan
-
-                pvalues_arr = getattr(result, 'pvalues', None)
-                if pvalues_arr is not None:
-                    p_value = float(np.asarray(pvalues_arr, dtype=float)[0])
-                else:
-                    p_value = np.nan
-
-                rows.append({
-                    'endpoint': endpoint_name,
-                    'broad_treatment': treatment_name,
-                    'feature': feature_name,
-                    'lasso_coef': float(feature_row['coef']),
-                    'n_rows': int(len(local)),
-                    'uni_coef': beta,
-                    'uni_hazard_ratio': float(np.exp(beta)),
-                    'uni_ci95_low': ci_low,
-                    'uni_ci95_high': ci_high,
-                    'uni_p_value': p_value,
-                    'uni_log_likelihood': _safe_loglike(result),
-                    'status': 'ok',
-                })
-            except Exception as exc:
-                rows.append({
-                    'endpoint': endpoint_name,
-                    'broad_treatment': treatment_name,
-                    'feature': feature_name,
-                    'lasso_coef': float(feature_row['coef']),
-                    'n_rows': int(len(local)),
-                    'uni_coef': np.nan,
-                    'uni_hazard_ratio': np.nan,
-                    'uni_ci95_low': np.nan,
-                    'uni_ci95_high': np.nan,
-                    'uni_p_value': np.nan,
-                    'uni_log_likelihood': np.nan,
-                    'status': f'failed: {exc}',
-                })
+            uni_result = _fit_univariate_cox(cox_df, time_col, event_col, feature_name)
+            rows.append({
+                'endpoint': endpoint_name,
+                'broad_treatment': treatment_name,
+                'feature': feature_name,
+                'lasso_coef': float(feature_row['coef']),
+                **uni_result,
+            })
 
     univariate_df = pd.DataFrame(rows)
     skipped_df = pd.DataFrame(skipped)
@@ -1203,72 +1134,13 @@ def run_all_univariate_cox(cox_run_registry):
         print(f'[{endpoint_name} | {treatment_name}] Running univariate Cox for {len(feature_cols)} features ...')
 
         for feature_name in feature_cols:
-            local = cox_df[[time_col, event_col, feature_name]].dropna().copy()
-
-            if local.empty or local[feature_name].nunique(dropna=True) < 2:
-                rows.append({
-                    'endpoint': endpoint_name,
-                    'broad_treatment': treatment_name,
-                    'feature': feature_name,
-                    'n_rows': int(len(local)),
-                    'uni_coef': np.nan,
-                    'uni_hazard_ratio': np.nan,
-                    'uni_ci95_low': np.nan,
-                    'uni_ci95_high': np.nan,
-                    'uni_p_value': np.nan,
-                    'status': 'skipped_low_variance_or_empty',
-                })
-                continue
-
-            try:
-                model = PHReg(
-                    endog=local[time_col].to_numpy(),
-                    exog=local[[feature_name]].to_numpy(),
-                    status=local[event_col].to_numpy(),
-                )
-                result = model.fit(disp=0)
-
-                beta = float(np.asarray(result.params, dtype=float)[0])
-                bse_arr = getattr(result, 'bse', None)
-                if bse_arr is not None:
-                    se = float(np.asarray(bse_arr, dtype=float)[0])
-                    ci_low = float(np.exp(beta - 1.96 * se))
-                    ci_high = float(np.exp(beta + 1.96 * se))
-                else:
-                    ci_low = np.nan
-                    ci_high = np.nan
-
-                pvalues_arr = getattr(result, 'pvalues', None)
-                if pvalues_arr is not None:
-                    p_value = float(np.asarray(pvalues_arr, dtype=float)[0])
-                else:
-                    p_value = np.nan
-
-                rows.append({
-                    'endpoint': endpoint_name,
-                    'broad_treatment': treatment_name,
-                    'feature': feature_name,
-                    'n_rows': int(len(local)),
-                    'uni_coef': beta,
-                    'uni_hazard_ratio': float(np.exp(beta)),
-                    'uni_ci95_low': ci_low,
-                    'uni_ci95_high': ci_high,
-                    'uni_p_value': p_value,
-                    'status': 'ok',
-                })
-            except Exception as exc:
-                rows.append({
-                    'endpoint': endpoint_name,
-                    'broad_treatment': treatment_name,
-                    'feature': feature_name,
-                    'n_rows': int(len(local)),
-                    'uni_coef': np.nan,
-                    'uni_hazard_ratio': np.nan,
-                    'uni_ci95_low': np.nan,
-                    'uni_ci95_high': np.nan,
-                    'uni_p_value': np.nan,
-                    'status': f'failed: {exc}',
-                })
+            uni_result = _fit_univariate_cox(cox_df, time_col, event_col, feature_name)
+            rows.append({
+                'endpoint': endpoint_name,
+                'broad_treatment': treatment_name,
+                'feature': feature_name,
+                **uni_result,
+            })
 
     all_uni_df = pd.DataFrame(rows)
     if not all_uni_df.empty:
