@@ -1,5 +1,4 @@
 import math
-import os
 import re
 import sys
 from difflib import SequenceMatcher
@@ -10,8 +9,10 @@ from matplotlib.lines import Line2D
 import numpy as np
 import pandas as pd
 import seaborn as sns
+from scipy.stats import pearsonr, spearmanr
 from statsmodels.duration.hazard_regression import PHReg
 from statsmodels.duration.survfunc import SurvfuncRight, survdiff
+from statsmodels.stats.multitest import multipletests
 
 PROJECT_ROOT = next(
     (candidate for candidate in [Path.cwd().resolve(), *Path.cwd().resolve().parents] if (candidate / 's2omics').exists()),
@@ -73,12 +74,36 @@ def clean_group_labels(series):
     return cleaned.where(~cleaned.str.lower().isin(_INVALID_LABELS))
 
 
+def _cluster_sort_key(name):
+    match = re.search(r'(\d+)', str(name))
+    return int(match.group(1)) if match else 10_000
+
+
 def get_cluster_feature_columns(df):
-    return [
-        column
-        for column in df.columns
-        if column.startswith('freq_cluster_')
-    ]
+    cols = [c for c in df.columns if c.startswith('freq_cluster_')]
+    return sorted(cols, key=_cluster_sort_key)
+
+
+def _select_p_col(df, use_fdr):
+    return 'p_fdr' if use_fdr and 'p_fdr' in df.columns else 'p'
+
+
+def _ensure_parent_dir(path):
+    Path(path).expanduser().parent.mkdir(parents=True, exist_ok=True)
+
+
+_UNIVARIATE_NAN_FIELDS = {
+    'uni_coef': np.nan,
+    'uni_hazard_ratio': np.nan,
+    'uni_ci95_low': np.nan,
+    'uni_ci95_high': np.nan,
+    'uni_p_value': np.nan,
+    'uni_log_likelihood': np.nan,
+}
+
+
+def _univariate_skip_result(n_rows, status):
+    return {'n_rows': int(n_rows), **_UNIVARIATE_NAN_FIELDS, 'status': status}
 
 
 def _get_endpoint_specs(df):
@@ -172,13 +197,10 @@ def summarize_clusters(save_folder_list, patient_ids, output_path, patch_size=16
 
     df = pd.DataFrame(records).fillna(0.0)
     meta_cols = ['patient_id', 'tissue_area_um2', 'n_tissue_superpixels']
-    freq_cols = sorted([c for c in df.columns if c.startswith('freq_cluster_')])
+    freq_cols = get_cluster_feature_columns(df)
     df = df[meta_cols + freq_cols]
 
-    output_dir = os.path.dirname(str(output_path))
-    if output_dir:
-        os.makedirs(output_dir, exist_ok=True)
-
+    _ensure_parent_dir(output_path)
     df.to_csv(output_path, index=False)
     print(f'Cluster summary saved to: {output_path}')
     print(f'  Patients: {len(df)}')
@@ -245,13 +267,13 @@ def merge_cluster_with_clinical(clinical_path, cluster_summary_path, output_path
     cluster_df = cluster_df.drop(columns=['patient_id'])
 
     clinical_ids = clinical_df['clinical_patient_id'].tolist()
-    match_records = []
-    for cluster_id in cluster_df['cluster_patient_id']:
-        matched_id, score = _best_match(cluster_id, clinical_ids, min_score=min_score)
-        match_records.append((matched_id, score))
-
-    cluster_df['matched_clinical_patient_id'] = [matched_id for matched_id, _ in match_records]
-    cluster_df['match_score'] = [score for _, score in match_records]
+    match_records = [
+        _best_match(cluster_id, clinical_ids, min_score=min_score)
+        for cluster_id in cluster_df['cluster_patient_id']
+    ]
+    cluster_df[['matched_clinical_patient_id', 'match_score']] = pd.DataFrame(
+        match_records, index=cluster_df.index, columns=['matched_clinical_patient_id', 'match_score']
+    )
     cluster_df['join_patient_id'] = cluster_df['matched_clinical_patient_id'].fillna(cluster_df['cluster_patient_id'])
     clinical_df['join_patient_id'] = clinical_df['clinical_patient_id']
 
@@ -266,25 +288,18 @@ def merge_cluster_with_clinical(clinical_path, cluster_summary_path, output_path
     merged_df['patient_id'] = merged_df['cluster_patient_id'].fillna(merged_df['clinical_patient_id'])
     merged_df = merged_df.drop(columns=['join_patient_id'])
 
-    merged_df = merged_df[[
+    priority_cols = [
         'patient_id',
         'cluster_patient_id',
         'clinical_patient_id',
         'matched_clinical_patient_id',
         'match_score',
         '_merge',
-    ] + [col for col in merged_df.columns if col not in {
-        'patient_id',
-        'cluster_patient_id',
-        'clinical_patient_id',
-        'matched_clinical_patient_id',
-        'match_score',
-        '_merge',
-    }]]
+    ]
+    priority_set = set(priority_cols)
+    merged_df = merged_df[priority_cols + [c for c in merged_df.columns if c not in priority_set]]
 
-    output_dir = os.path.dirname(str(output_path))
-    if output_dir:
-        os.makedirs(output_dir, exist_ok=True)
+    _ensure_parent_dir(output_path)
     merged_df.to_csv(output_path, index=False, na_rep='NA')
 
     print(f'Clinical rows: {len(clinical_df)}')
@@ -720,10 +735,7 @@ def compare_cluster_features_by_group(df, group_col, title, cluster_cols, min_gr
 
     analysis_df = analysis_df[analysis_df[group_col].isin(valid_groups)]
 
-    plottable_features = []
-    for feature in cluster_cols:
-        if analysis_df[feature].notna().sum() > 0:
-            plottable_features.append(feature)
+    plottable_features = [f for f in cluster_cols if analysis_df[f].notna().any()]
 
     if not plottable_features:
         print(f'[{title}] No plottable cluster features found.')
@@ -993,16 +1005,7 @@ def _fit_univariate_cox(cox_df, time_col, event_col, feature_name):
     local = cox_df[[time_col, event_col, feature_name]].dropna().copy()
 
     if local.empty or local[feature_name].nunique(dropna=True) < 2:
-        return {
-            'n_rows': int(len(local)),
-            'uni_coef': np.nan,
-            'uni_hazard_ratio': np.nan,
-            'uni_ci95_low': np.nan,
-            'uni_ci95_high': np.nan,
-            'uni_p_value': np.nan,
-            'uni_log_likelihood': np.nan,
-            'status': 'skipped_low_variance_or_empty',
-        }
+        return _univariate_skip_result(len(local), 'skipped_low_variance_or_empty')
 
     try:
         model = PHReg(
@@ -1036,16 +1039,7 @@ def _fit_univariate_cox(cox_df, time_col, event_col, feature_name):
             'status': 'ok',
         }
     except Exception as exc:
-        return {
-            'n_rows': int(len(local)),
-            'uni_coef': np.nan,
-            'uni_hazard_ratio': np.nan,
-            'uni_ci95_low': np.nan,
-            'uni_ci95_high': np.nan,
-            'uni_p_value': np.nan,
-            'uni_log_likelihood': np.nan,
-            'status': f'failed: {exc}',
-        }
+        return _univariate_skip_result(len(local), f'failed: {exc}')
 
 
 def run_univariate_cox_for_lasso_selected(cox_run_registry, coef_threshold=1e-8):
@@ -1143,14 +1137,16 @@ def run_all_univariate_cox(cox_run_registry):
             })
 
     all_uni_df = pd.DataFrame(rows)
-    if not all_uni_df.empty:
+    if all_uni_df.empty:
+        ok_count = sig_count = 0
+    else:
         all_uni_df = all_uni_df.sort_values(
             ['endpoint', 'broad_treatment', 'uni_p_value'],
             na_position='last',
         )
-
-    ok_count = int((all_uni_df['status'] == 'ok').sum()) if not all_uni_df.empty else 0
-    sig_count = int(((all_uni_df['status'] == 'ok') & (all_uni_df['uni_p_value'] < 0.05)).sum()) if not all_uni_df.empty else 0
+        ok_mask = all_uni_df['status'] == 'ok'
+        ok_count = int(ok_mask.sum())
+        sig_count = int((ok_mask & (all_uni_df['uni_p_value'] < 0.05)).sum())
 
     print(f'\nAll univariate Cox results: {len(all_uni_df)} feature-endpoint-treatment combinations.')
     print(f'  Successfully fit: {ok_count}')
@@ -1273,23 +1269,17 @@ def plot_forest_by_treatment(all_univariate_df, cox_run_registry, coef_threshold
         fig_height = max(4, 0.35 * len(subset) + 1.5)
         fig, ax = plt.subplots(figsize=(10, fig_height))
 
+        forest_style = {
+            (True, True):   ('#d62728', 'D'),
+            (True, False):  ('#ff7f0e', 's'),
+            (False, True):  ('#1f77b4', 'o'),
+            (False, False): ('#7f7f7f', 'o'),
+        }
         for i, (_, row) in enumerate(subset.iterrows()):
             hr = row['uni_hazard_ratio']
             ci_low = row['uni_ci95_low']
             ci_high = row['uni_ci95_high']
-
-            if row['is_lasso'] and row['is_significant']:
-                color = '#d62728'
-                marker = 'D'
-            elif row['is_lasso']:
-                color = '#ff7f0e'
-                marker = 's'
-            elif row['is_significant']:
-                color = '#1f77b4'
-                marker = 'o'
-            else:
-                color = '#7f7f7f'
-                marker = 'o'
+            color, marker = forest_style[(bool(row['is_lasso']), bool(row['is_significant']))]
 
             if pd.notna(ci_low) and pd.notna(ci_high):
                 ax.plot([ci_low, ci_high], [i, i], color=color, linewidth=1.5, solid_capstyle='round')
@@ -1330,8 +1320,128 @@ def plot_forest_by_treatment(all_univariate_df, cox_run_registry, coef_threshold
         print(f'  Lasso-selected in plot: {n_lasso_shown} | Univariate significant: {n_sig_shown}')
 
 
+def plot_volcano_by_treatment(
+    all_univariate_df,
+    cox_run_registry,
+    coef_threshold=1e-8,
+    p_threshold=0.05,
+    label_top_n=10,
+    figsize=(9, 7),
+):
+    """Volcano plot of univariate Cox results per endpoint/treatment.
+
+    X-axis: log2(HR)  (protective < 0 < risky)
+    Y-axis: -log10(p-value)
+    Lasso-selected features are drawn with a black edge ring.
+    """
+    if all_univariate_df.empty:
+        print('No univariate results available for volcano plots.')
+        return
+
+    neg_log10_threshold = -math.log10(p_threshold)
+
+    for (endpoint_name, treatment_name), run_data in cox_run_registry.items():
+        coef_tables = run_data.get('coef_tables', {})
+        lasso_table = coef_tables.get('lasso')
+        lasso_selected = set()
+        if lasso_table is not None and not lasso_table.empty:
+            lasso_selected = set(lasso_table[lasso_table['coef'].abs() > coef_threshold].index)
+
+        subset = all_univariate_df[
+            (all_univariate_df['endpoint'] == endpoint_name)
+            & (all_univariate_df['broad_treatment'] == treatment_name)
+            & (all_univariate_df['status'] == 'ok')
+        ].copy()
+
+        subset = subset[subset['uni_hazard_ratio'].notna() & subset['uni_p_value'].notna()]
+        subset = subset[(subset['uni_hazard_ratio'] > 0) & np.isfinite(subset['uni_hazard_ratio'])]
+
+        if subset.empty:
+            print(f'[{endpoint_name} | {treatment_name}] No valid univariate results for volcano plot.')
+            continue
+
+        min_positive_p = subset.loc[subset['uni_p_value'] > 0, 'uni_p_value'].min()
+        if pd.isna(min_positive_p):
+            min_positive_p = 1e-300
+        floor_p = max(min_positive_p * 0.1, 1e-300)
+        p_plot = subset['uni_p_value'].clip(lower=floor_p)
+
+        subset['log2_hr'] = np.log2(subset['uni_hazard_ratio'].astype(float))
+        subset['neg_log10_p'] = -np.log10(p_plot)
+        subset['is_lasso'] = subset['feature'].isin(lasso_selected)
+
+        colors = np.full(len(subset), '#bdbdbd', dtype=object)
+        sig_mask = subset['uni_p_value'].values < p_threshold
+        risky_mask = sig_mask & (subset['log2_hr'].values > 0)
+        protect_mask = sig_mask & (subset['log2_hr'].values < 0)
+        colors[risky_mask] = '#d62728'
+        colors[protect_mask] = '#1f77b4'
+
+        edge_colors = np.where(subset['is_lasso'].values, 'black', 'none')
+        edge_widths = np.where(subset['is_lasso'].values, 1.1, 0.0)
+
+        fig, ax = plt.subplots(figsize=figsize)
+        ax.scatter(
+            subset['log2_hr'].values,
+            subset['neg_log10_p'].values,
+            c=colors,
+            s=55,
+            alpha=0.85,
+            edgecolors=edge_colors,
+            linewidths=edge_widths,
+            zorder=3,
+        )
+
+        ax.axhline(neg_log10_threshold, color='black', linestyle='--', linewidth=0.8, alpha=0.6)
+        ax.axvline(0.0, color='black', linestyle='--', linewidth=0.8, alpha=0.6)
+
+        if label_top_n > 0:
+            top_subset = subset.sort_values('uni_p_value').head(label_top_n)
+            for _, row in top_subset.iterrows():
+                ax.annotate(
+                    row['feature'],
+                    xy=(row['log2_hr'], row['neg_log10_p']),
+                    xytext=(4, 4),
+                    textcoords='offset points',
+                    fontsize=7.5,
+                    color='black',
+                )
+
+        ax.set_xlabel('log2(Hazard Ratio)   [protective ←    → risky]')
+        ax.set_ylabel('-log10(p-value)')
+        ax.set_title(
+            f'Volcano Plot: {endpoint_name} | {treatment_name}\n'
+            f'(n={len(subset)} features, p-threshold = {p_threshold})'
+        )
+        ax.grid(alpha=0.2)
+
+        n_sig = int(sig_mask.sum())
+        n_risky = int(risky_mask.sum())
+        n_protect = int(protect_mask.sum())
+        n_lasso_shown = int(subset['is_lasso'].sum())
+
+        legend_elements = [
+            Line2D([0], [0], marker='o', color='#d62728', linestyle='None', markersize=7,
+                   label=f'Risky & p<{p_threshold} (n={n_risky})'),
+            Line2D([0], [0], marker='o', color='#1f77b4', linestyle='None', markersize=7,
+                   label=f'Protective & p<{p_threshold} (n={n_protect})'),
+            Line2D([0], [0], marker='o', color='#bdbdbd', linestyle='None', markersize=7,
+                   label=f'Not significant (n={len(subset) - n_sig})'),
+            Line2D([0], [0], marker='o', markerfacecolor='white', markeredgecolor='black',
+                   linestyle='None', markersize=7, label=f'Lasso-selected (n={n_lasso_shown})'),
+        ]
+        ax.legend(handles=legend_elements, loc='best', fontsize=8, frameon=True)
+
+        plt.tight_layout()
+        plt.show()
+
+        print(f'[{endpoint_name} | {treatment_name}] Volcano plot: '
+              f'{len(subset)} features | significant: {n_sig} '
+              f'(risky: {n_risky}, protective: {n_protect}) | lasso-selected shown: {n_lasso_shown}')
+
+
 def run_univariate_analysis_and_forest_plots(cox_run_registry, coef_threshold=1e-8, p_threshold=0.05, max_features=30):
-    """Run all-feature univariate Cox, compare vs. Lasso, and generate forest plots."""
+    """Run all-feature univariate Cox, compare vs. Lasso, and generate forest + volcano plots."""
     all_uni_df = run_all_univariate_cox(cox_run_registry)
 
     comparison_df = compare_univariate_vs_lasso(
@@ -1349,4 +1459,333 @@ def run_univariate_analysis_and_forest_plots(cox_run_registry, coef_threshold=1e
         max_features=max_features,
     )
 
+    plot_volcano_by_treatment(
+        all_uni_df,
+        cox_run_registry,
+        coef_threshold=coef_threshold,
+        p_threshold=p_threshold,
+    )
+
     return all_uni_df, comparison_df
+
+
+# ─── IMC correlation analysis ────────────────────────────────────────────────
+
+IMC_FILE_SPECS = [
+    ('broad_clusters', 'broad_clusters_expr_density_p1.csv',
+     'Broad cellular-neighborhood (15-NN) density'),
+    ('local_clusters', 'local_clusters_expr_density_p1.csv',
+     'Local cellular-neighborhood (5-NN) density'),
+    ('celltypes', 'celltypes_density_dat_p1.csv',
+     'Cell-type density'),
+    ('clustered_cells', 'clustered_cells_density_dat_p1.csv',
+     'Clustered cell-type density'),
+]
+
+
+def load_imc_density_tables(imc_dir, file_map=None, id_col='immucan_id'):
+    """Load IMC density tables from `imc_dir` into a dict keyed by short name.
+
+    `file_map` (optional) overrides the filenames, e.g.
+    {'broad_clusters': 'my_custom_broad.csv'}.
+    """
+    imc_dir = Path(imc_dir)
+    specs = IMC_FILE_SPECS
+    tables = {}
+    for short_name, default_filename, description in specs:
+        filename = (file_map or {}).get(short_name, default_filename)
+        path = imc_dir / filename
+        if not path.exists():
+            print(f'[IMC load] {short_name}: skipped (file not found: {path})')
+            continue
+        df = pd.read_csv(path)
+        if id_col not in df.columns:
+            print(f'[IMC load] {short_name}: skipped (no `{id_col}` column in {path.name})')
+            continue
+        df[id_col] = df[id_col].astype(str).str.strip()
+        tables[short_name] = df
+        print(f'[IMC load] {short_name}: {len(df)} rows × {df.shape[1] - 1} feature columns '
+              f'({description})')
+    return tables
+
+
+def _imc_correlation_rows(merged_df, imc_df, cluster_cols, imc_feature_cols,
+                          id_col_left, id_col_right, imc_short_name, imc_description,
+                          method, min_n):
+    merged_slim = merged_df[[id_col_left] + cluster_cols].copy()
+    merged_slim[id_col_left] = merged_slim[id_col_left].astype(str).str.strip()
+    imc_slim = imc_df[[id_col_right] + imc_feature_cols].copy()
+    imc_slim[id_col_right] = imc_slim[id_col_right].astype(str).str.strip()
+
+    joined = merged_slim.merge(
+        imc_slim, left_on=id_col_left, right_on=id_col_right, how='inner'
+    )
+    if joined.empty:
+        print(f'[IMC corr | {imc_short_name}] No patients matched on {id_col_left}↔{id_col_right}.')
+        return pd.DataFrame(), 0
+
+    rows = []
+    for cluster in cluster_cols:
+        for imc_feature in imc_feature_cols:
+            pair = joined[[cluster, imc_feature]].apply(pd.to_numeric, errors='coerce').dropna()
+            n = len(pair)
+            if n < min_n or pair[cluster].nunique() < 2 or pair[imc_feature].nunique() < 2:
+                rows.append({
+                    'imc_table': imc_short_name,
+                    'imc_description': imc_description,
+                    'cluster': cluster,
+                    'imc_feature': imc_feature,
+                    'n': n,
+                    'r': np.nan,
+                    'p': np.nan,
+                    'status': 'skipped_low_n_or_constant',
+                })
+                continue
+            try:
+                if method == 'pearson':
+                    r, p = pearsonr(pair[cluster].values, pair[imc_feature].values)
+                else:
+                    r, p = spearmanr(pair[cluster].values, pair[imc_feature].values)
+            except Exception as exc:
+                rows.append({
+                    'imc_table': imc_short_name,
+                    'imc_description': imc_description,
+                    'cluster': cluster,
+                    'imc_feature': imc_feature,
+                    'n': n,
+                    'r': np.nan,
+                    'p': np.nan,
+                    'status': f'failed:{exc}',
+                })
+                continue
+            rows.append({
+                'imc_table': imc_short_name,
+                'imc_description': imc_description,
+                'cluster': cluster,
+                'imc_feature': imc_feature,
+                'n': int(n),
+                'r': float(r),
+                'p': float(p),
+                'status': 'ok',
+            })
+
+    df = pd.DataFrame(rows)
+    ok = df['status'] == 'ok'
+    if ok.any():
+        _, p_fdr, _, _ = multipletests(df.loc[ok, 'p'].values, method='fdr_bh')
+        df['p_fdr'] = np.nan
+        df.loc[ok, 'p_fdr'] = p_fdr
+    else:
+        df['p_fdr'] = np.nan
+
+    return df, len(joined)
+
+
+def correlate_clusters_with_imc(
+    merged_df,
+    imc_tables,
+    cluster_cols=None,
+    method='spearman',
+    min_n=20,
+    id_col_left='clinical_patient_id',
+    id_col_right='immucan_id',
+):
+    """Correlate every H&E cluster frequency column with every IMC feature column.
+
+    Returns a long-form DataFrame with columns:
+      imc_table, imc_description, cluster, imc_feature, n, r, p, p_fdr, status.
+    """
+    if not imc_tables:
+        print('[IMC corr] No IMC tables provided.')
+        return pd.DataFrame()
+    if id_col_left not in merged_df.columns:
+        raise KeyError(
+            f'merged_df is missing the patient-id column `{id_col_left}`. '
+            f'Available columns include: {list(merged_df.columns)[:10]}'
+        )
+    if cluster_cols is None:
+        cluster_cols = get_cluster_feature_columns(merged_df)
+    if not cluster_cols:
+        print('[IMC corr] No cluster frequency columns found in merged_df.')
+        return pd.DataFrame()
+
+    description_map = {short: description for short, _, description in IMC_FILE_SPECS}
+
+    all_frames = []
+    for imc_short_name, imc_df in imc_tables.items():
+        imc_feature_cols = [
+            c for c in imc_df.columns
+            if c != id_col_right and pd.api.types.is_numeric_dtype(imc_df[c])
+        ]
+        if not imc_feature_cols:
+            print(f'[IMC corr | {imc_short_name}] No numeric feature columns — skipping.')
+            continue
+
+        frame, n_matched = _imc_correlation_rows(
+            merged_df=merged_df,
+            imc_df=imc_df,
+            cluster_cols=cluster_cols,
+            imc_feature_cols=imc_feature_cols,
+            id_col_left=id_col_left,
+            id_col_right=id_col_right,
+            imc_short_name=imc_short_name,
+            imc_description=description_map.get(imc_short_name, ''),
+            method=method,
+            min_n=min_n,
+        )
+        if frame.empty:
+            continue
+        all_frames.append(frame)
+        n_ok = int((frame['status'] == 'ok').sum())
+        print(f'[IMC corr | {imc_short_name}] Matched {n_matched} patients; '
+              f'{n_ok}/{len(frame)} correlations computed (method={method}).')
+
+    if not all_frames:
+        return pd.DataFrame()
+    return pd.concat(all_frames, ignore_index=True)
+
+
+def plot_imc_correlation_heatmap(
+    corr_long_df,
+    imc_short_name,
+    p_threshold=0.05,
+    use_fdr=True,
+    cluster_order=None,
+    figsize=None,
+    title_suffix=None,
+):
+    """Plot a signed -log10(p) heatmap: rows=H&E clusters, cols=IMC features.
+
+    Red = positive correlation, blue = negative, alpha-scaled by significance.
+    Only correlations with status=='ok' are shown; non-significant cells are faded.
+    """
+    subset = corr_long_df[
+        (corr_long_df['imc_table'] == imc_short_name)
+        & (corr_long_df['status'] == 'ok')
+    ].copy()
+    if subset.empty:
+        print(f'[IMC heatmap | {imc_short_name}] No valid correlations to plot.')
+        return
+
+    p_col = _select_p_col(subset, use_fdr)
+    subset['signed_neg_log10_p'] = -np.log10(subset[p_col].clip(lower=1e-300)) * np.sign(subset['r'])
+
+    pivot = subset.pivot(index='cluster', columns='imc_feature', values='signed_neg_log10_p')
+
+    if cluster_order is not None:
+        pivot = pivot.reindex([c for c in cluster_order if c in pivot.index])
+    else:
+        pivot = pivot.reindex(sorted(pivot.index, key=_cluster_sort_key))
+
+    pivot = pivot[sorted(pivot.columns)]
+
+    n_rows, n_cols = pivot.shape
+    if figsize is None:
+        figsize = (max(6, 0.35 * n_cols + 3), max(4, 0.3 * n_rows + 2))
+
+    abs_max = float(np.nanmax(np.abs(pivot.values))) if np.isfinite(pivot.values).any() else 1.0
+    vmax = max(abs_max, 1.0)
+
+    sig_pivot = subset.pivot(index='cluster', columns='imc_feature', values=p_col)
+    sig_pivot = sig_pivot.reindex(index=pivot.index, columns=pivot.columns)
+    annot = np.where(sig_pivot.values < p_threshold, '*', '')
+
+    fig, ax = plt.subplots(figsize=figsize)
+    sns.heatmap(
+        pivot,
+        ax=ax,
+        cmap='RdBu_r',
+        center=0,
+        vmin=-vmax,
+        vmax=vmax,
+        linewidths=0.3,
+        linecolor='white',
+        cbar_kws={'label': f'signed -log10({p_col})'},
+        annot=annot,
+        fmt='',
+        annot_kws={'fontsize': 8, 'color': 'black'},
+    )
+    title = f'H&E cluster ↔ IMC correlation: {imc_short_name}'
+    if title_suffix:
+        title += f' — {title_suffix}'
+    title += f'\n(* = {p_col} < {p_threshold})'
+    ax.set_title(title)
+    ax.set_xlabel('IMC feature')
+    ax.set_ylabel('H&E cluster')
+    plt.xticks(rotation=45, ha='right')
+    plt.yticks(rotation=0)
+    plt.tight_layout()
+    plt.show()
+
+
+def summarize_top_imc_correlations(corr_long_df, top_n=20, use_fdr=True):
+    """Print and return the top-N most significant cluster × IMC pairs (per IMC table)."""
+    if corr_long_df.empty:
+        print('[IMC top pairs] No correlations available.')
+        return pd.DataFrame()
+
+    p_col = _select_p_col(corr_long_df, use_fdr)
+    ok = corr_long_df[corr_long_df['status'] == 'ok'].copy()
+    if ok.empty:
+        print('[IMC top pairs] No valid correlations.')
+        return pd.DataFrame()
+
+    ok = ok.sort_values([p_col, 'p'], ascending=True)
+    top_rows = []
+    for imc_short_name, group in ok.groupby('imc_table'):
+        head = group.head(top_n).copy()
+        top_rows.append(head)
+        print(f'\n[IMC top pairs | {imc_short_name}] Top {len(head)} by {p_col}:')
+        display_cols = ['cluster', 'imc_feature', 'r', 'p', p_col, 'n']
+        display(head[display_cols])
+    return pd.concat(top_rows, ignore_index=True) if top_rows else pd.DataFrame()
+
+
+def run_imc_correlation_analysis(
+    merged_df,
+    imc_dir,
+    method='spearman',
+    p_threshold=0.05,
+    use_fdr=True,
+    top_n=20,
+    min_n=20,
+    id_col_left='clinical_patient_id',
+    id_col_right='immucan_id',
+    file_map=None,
+):
+    """Top-level orchestrator:
+      1. Load IMC tables from `imc_dir`.
+      2. Correlate each H&E cluster frequency with each IMC feature.
+      3. Plot one heatmap per IMC table.
+      4. Print/return the top-N most significant pairs per table.
+    """
+    imc_tables = load_imc_density_tables(imc_dir, file_map=file_map, id_col=id_col_right)
+    if not imc_tables:
+        print('[IMC analysis] No IMC tables loaded; aborting.')
+        return pd.DataFrame(), pd.DataFrame()
+
+    corr_df = correlate_clusters_with_imc(
+        merged_df=merged_df,
+        imc_tables=imc_tables,
+        method=method,
+        min_n=min_n,
+        id_col_left=id_col_left,
+        id_col_right=id_col_right,
+    )
+    if corr_df.empty:
+        return corr_df, pd.DataFrame()
+
+    for imc_short_name in imc_tables.keys():
+        plot_imc_correlation_heatmap(
+            corr_long_df=corr_df,
+            imc_short_name=imc_short_name,
+            p_threshold=p_threshold,
+            use_fdr=use_fdr,
+        )
+
+    top_df = summarize_top_imc_correlations(
+        corr_long_df=corr_df,
+        top_n=top_n,
+        use_fdr=use_fdr,
+    )
+    return corr_df, top_df
