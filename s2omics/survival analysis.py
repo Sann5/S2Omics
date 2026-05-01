@@ -1718,6 +1718,178 @@ def plot_imc_correlation_heatmap(
     plt.show()
 
 
+def plot_imc_correlation_r_heatmap(
+    corr_long_df,
+    imc_short_name,
+    p_threshold=0.05,
+    use_fdr=True,
+    cluster_order=None,
+    figsize=None,
+    title_suffix=None,
+):
+    """Heatmap of plain Spearman correlation coefficients (r in [-1, 1]).
+
+    Cells significant at p (or FDR) < threshold are annotated with '*'.
+    Companion to `plot_imc_correlation_heatmap`, which encodes significance
+    in color rather than coefficient strength.
+    """
+    subset = corr_long_df[
+        (corr_long_df['imc_table'] == imc_short_name)
+        & (corr_long_df['status'] == 'ok')
+    ].copy()
+    if subset.empty:
+        print(f'[IMC r-heatmap | {imc_short_name}] No valid correlations to plot.')
+        return
+
+    p_col = _select_p_col(subset, use_fdr)
+
+    pivot_r = subset.pivot(index='cluster', columns='imc_feature', values='r')
+    if cluster_order is not None:
+        pivot_r = pivot_r.reindex([c for c in cluster_order if c in pivot_r.index])
+    else:
+        pivot_r = pivot_r.reindex(sorted(pivot_r.index, key=_cluster_sort_key))
+    pivot_r = pivot_r[sorted(pivot_r.columns)]
+
+    n_rows, n_cols = pivot_r.shape
+    if figsize is None:
+        figsize = (max(6, 0.35 * n_cols + 3), max(4, 0.3 * n_rows + 2))
+
+    sig_pivot = subset.pivot(index='cluster', columns='imc_feature', values=p_col)
+    sig_pivot = sig_pivot.reindex(index=pivot_r.index, columns=pivot_r.columns)
+    annot = np.where(sig_pivot.values < p_threshold, '*', '')
+
+    fig, ax = plt.subplots(figsize=figsize)
+    sns.heatmap(
+        pivot_r,
+        ax=ax,
+        cmap='RdBu_r',
+        center=0,
+        vmin=-1.0,
+        vmax=1.0,
+        linewidths=0.3,
+        linecolor='white',
+        cbar_kws={'label': 'Spearman r'},
+        annot=annot,
+        fmt='',
+        annot_kws={'fontsize': 8, 'color': 'black'},
+    )
+    title = f'Spearman r heatmap: H&E cluster ↔ IMC ({imc_short_name})'
+    if title_suffix:
+        title += f' — {title_suffix}'
+    title += f'\n(* = {p_col} < {p_threshold})'
+    ax.set_title(title)
+    ax.set_xlabel('IMC feature')
+    ax.set_ylabel('H&E cluster')
+    plt.xticks(rotation=45, ha='right')
+    plt.yticks(rotation=0)
+    plt.tight_layout()
+    plt.show()
+
+
+def plot_imc_correlation_bubbles(
+    corr_long_df,
+    imc_short_name,
+    p_threshold=0.05,
+    use_fdr=True,
+    cluster_order=None,
+    figsize=None,
+    title_suffix=None,
+    min_marker_size=15,
+    max_marker_size=320,
+):
+    """Bubble plot — color = Spearman r, size = -log10(p-value).
+
+    Combines direction/strength (color in [-1, 1]) and significance (dot size)
+    in a single panel. Significance threshold is shown as a dashed-edge ring.
+    """
+    subset = corr_long_df[
+        (corr_long_df['imc_table'] == imc_short_name)
+        & (corr_long_df['status'] == 'ok')
+    ].copy()
+    if subset.empty:
+        print(f'[IMC bubbles | {imc_short_name}] No valid correlations to plot.')
+        return
+
+    p_col = _select_p_col(subset, use_fdr)
+    subset['neg_log10_p'] = -np.log10(subset[p_col].clip(lower=1e-300))
+
+    if cluster_order is not None:
+        clusters = [c for c in cluster_order if c in subset['cluster'].unique()]
+    else:
+        clusters = sorted(subset['cluster'].unique(), key=_cluster_sort_key)
+    imc_features = sorted(subset['imc_feature'].unique())
+
+    cluster_to_y = {c: i for i, c in enumerate(clusters)}
+    feature_to_x = {f: i for i, f in enumerate(imc_features)}
+    subset['x'] = subset['imc_feature'].map(feature_to_x)
+    subset['y'] = subset['cluster'].map(cluster_to_y)
+
+    nlp_max = float(np.nanmax(subset['neg_log10_p'].values))
+    if not np.isfinite(nlp_max) or nlp_max <= 0:
+        nlp_max = 1.0
+    sizes = min_marker_size + (subset['neg_log10_p'].values / nlp_max) * (max_marker_size - min_marker_size)
+    sizes = np.clip(sizes, min_marker_size, max_marker_size)
+
+    n_rows = len(clusters)
+    n_cols = len(imc_features)
+    if figsize is None:
+        figsize = (max(7, 0.42 * n_cols + 3.5), max(4.5, 0.38 * n_rows + 2))
+
+    fig, ax = plt.subplots(figsize=figsize)
+    sc = ax.scatter(
+        subset['x'].values,
+        subset['y'].values,
+        c=subset['r'].values,
+        s=sizes,
+        cmap='RdBu_r',
+        vmin=-1.0,
+        vmax=1.0,
+        edgecolors='black',
+        linewidths=0.4,
+        alpha=0.95,
+    )
+
+    ax.set_xticks(range(n_cols))
+    ax.set_xticklabels(imc_features, rotation=45, ha='right')
+    ax.set_yticks(range(n_rows))
+    ax.set_yticklabels(clusters)
+    ax.set_xlim(-0.5, n_cols - 0.5)
+    ax.set_ylim(-0.5, n_rows - 0.5)
+    ax.invert_yaxis()
+    ax.grid(alpha=0.2)
+
+    ax.set_xlabel('IMC feature')
+    ax.set_ylabel('H&E cluster')
+    title = f'Bubble plot: H&E cluster ↔ IMC ({imc_short_name})'
+    if title_suffix:
+        title += f' — {title_suffix}'
+    title += f'\n(color = Spearman r, size = -log10({p_col}))'
+    ax.set_title(title)
+
+    cbar = plt.colorbar(sc, ax=ax, shrink=0.7)
+    cbar.set_label('Spearman r')
+
+    legend_p_levels = [p_threshold, p_threshold / 10.0, p_threshold / 100.0]
+    legend_handles = []
+    legend_labels = []
+    for p_level in legend_p_levels:
+        nlp = -math.log10(p_level)
+        size = min_marker_size + min(nlp / nlp_max, 1.0) * (max_marker_size - min_marker_size)
+        legend_handles.append(plt.scatter([], [], s=size, c='lightgrey',
+                                          edgecolors='black', linewidths=0.4))
+        legend_labels.append(f'{p_col} = {p_level:g}')
+    ax.legend(
+        legend_handles, legend_labels,
+        scatterpoints=1, frameon=True,
+        loc='upper left', bbox_to_anchor=(1.18, 1.0),
+        title='Significance',
+        labelspacing=1.4,
+    )
+
+    plt.tight_layout()
+    plt.show()
+
+
 def summarize_top_imc_correlations(corr_long_df, top_n=20, use_fdr=True):
     """Print and return the top-N most significant cluster × IMC pairs (per IMC table)."""
     if corr_long_df.empty:
@@ -1756,7 +1928,10 @@ def run_imc_correlation_analysis(
     """Top-level orchestrator:
       1. Load IMC tables from `imc_dir`.
       2. Correlate each H&E cluster frequency with each IMC feature.
-      3. Plot one heatmap per IMC table.
+      3. Per IMC table, draw three views:
+           a) signed -log10(p) heatmap (significance-colored)
+           b) Spearman r heatmap (direction & strength only)
+           c) bubble plot (color = r, size = -log10(p))
       4. Print/return the top-N most significant pairs per table.
     """
     imc_tables = load_imc_density_tables(imc_dir, file_map=file_map, id_col=id_col_right)
@@ -1777,6 +1952,18 @@ def run_imc_correlation_analysis(
 
     for imc_short_name in imc_tables.keys():
         plot_imc_correlation_heatmap(
+            corr_long_df=corr_df,
+            imc_short_name=imc_short_name,
+            p_threshold=p_threshold,
+            use_fdr=use_fdr,
+        )
+        plot_imc_correlation_r_heatmap(
+            corr_long_df=corr_df,
+            imc_short_name=imc_short_name,
+            p_threshold=p_threshold,
+            use_fdr=use_fdr,
+        )
+        plot_imc_correlation_bubbles(
             corr_long_df=corr_df,
             imc_short_name=imc_short_name,
             p_threshold=p_threshold,
