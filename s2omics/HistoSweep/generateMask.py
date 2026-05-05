@@ -1,4 +1,3 @@
-#### Load package ####
 import os
 import numpy as np
 import matplotlib.pyplot as plt
@@ -7,25 +6,32 @@ from PIL import Image
 from .UTILS import measure_peak_memory
 
 @measure_peak_memory
-def generate_final_mask(prefix, he, mask1_updated, mask2, output_dir, clean_background = True, super_pixel_size=16, minSize = 10):
-
+def generate_final_mask(
+    prefix,
+    he,
+    mask1_updated,
+    mask2,
+    output_dir,
+    clean_background=True,
+    super_pixel_size=16,
+    minSize=10,
+):
 
     # Combine masks
     masked = (mask1_updated.flatten() | mask2.flatten())
     image_height, image_width = he.shape[:2]
 
-    # Reshape to super-pixel grid
+    # Reshape to super-pixel grid (foreground = 1 means kept tissue)
     num_super_pixels_y = image_height // super_pixel_size
     num_super_pixels_x = image_width // super_pixel_size
     mask = masked.reshape((num_super_pixels_y, num_super_pixels_x))
-    cleaned = 1 - mask
-    cleaned = (cleaned * 255).astype(np.uint8)
+    cleaned = (1 - mask).astype(bool)
 
-    # Clean artifacts (specs) in super-pixel space
+    # Clean small artifacts (specs) in super-pixel space
     if clean_background:
-        binary = 1 - mask  # invert to remove specs (foreground = 1)
-        cleaned = morphology.remove_small_objects(binary.astype(bool), min_size = minSize, connectivity=2)
-        cleaned = (cleaned * 255).astype(np.uint8)
+        cleaned = morphology.remove_small_objects(cleaned, min_size=minSize, connectivity=2)
+
+    cleaned = (cleaned.astype(np.uint8) * 255)
 
     # Save the cleaned mask at super-pixel level
     #save_pickle(cleaned, os.path.join(f"{prefix}/{output_dir}", 'conserve_index_mask-small.pickle'))

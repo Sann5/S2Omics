@@ -5,12 +5,11 @@ from torchvision import transforms
 import timm
 from timm.layers import SwiGLUPacked
 import numpy as np
-from .s1_utils import save_pickle, load_image
+from . import step_paths
+from .s1_utils import save_pickle, load_image, stage_is_complete
 from PIL import Image
 import tqdm
-import argparse
 from torch.utils.data import Dataset, DataLoader
-from typing import Any, Callable, Dict, Optional, Set, Tuple, Type, Union, List
 
 
 def _resolve_device(requested_device: str):
@@ -149,7 +148,7 @@ def extract_features(model, batch):
     return feature_emb, patch_emb
 
 @torch.inference_mode()
-def histology_feature_extraction(prefix, save_folder,
+def histology_feature_extraction(save_folder,
                                  foundation_model='uni',
                                  ckpt_path='../checkpoints/uni/',
                                  device='cuda:0',
@@ -159,8 +158,9 @@ def histology_feature_extraction(prefix, save_folder,
     '''
     extracting hierarchical features of superpixels using a modified version of current pathology foundation models
     Parameters:
-        prefix: folder path of H&E stained image, '/home/H&E_image/' for an example
-        save_folder: the name of save folder
+        save_folder: per-sample S2Omics output root. Reads ``he.*`` from
+            ``save_folder/p1_preprocess/`` and writes embeddings + completion
+            marker to ``save_folder/p3_features/``.
         foundation_model: the name of foundation model used for feature extraction, user can select from uni, virchow and gigapath
         ckpt_path: the path to foundation model parameter files (should be named as 'pytorch_model.bin'), './checkpoints/uni/' for an example
         device: default = 'cuda：0'
@@ -168,12 +168,25 @@ def histology_feature_extraction(prefix, save_folder,
         down_samp_step: the down-sampling step, default = 10 refers to only extract features for superpixels whose row_index and col_index can both be divided by 10 (roughly 1:100 down-sampling rate). down_samp_step = 1 means extract features for every superpixel
         num_workers: default = 4
     '''
-    if not os.path.exists(save_folder):
-        os.makedirs(save_folder)
-    save_folder = save_folder+'/'
-    if not os.path.exists(save_folder+'pickle_files'):
-        os.makedirs(save_folder+'pickle_files')
-    pickle_folder = save_folder+'pickle_files/'
+    p1_dir = step_paths.step_dir(save_folder, step_paths.P1_PREPROCESS, create=False)
+    p3_dir = step_paths.step_dir(save_folder, step_paths.P3_FEATURES)
+
+    completion_marker = (
+        p3_dir
+        + f'feature_extraction_complete_{foundation_model}_downsamp_{down_samp_step}.pickle'
+    )
+    expected_metadata = {
+        'foundation_model': foundation_model,
+        'ckpt_path': os.path.abspath(ckpt_path),
+        'down_samp_step': down_samp_step,
+    }
+    num_patches_path = p3_dir + 'num_patches.pickle'
+    if stage_is_complete(completion_marker, expected_metadata, required_outputs=(num_patches_path,)):
+        print(
+            'Skipping feature extraction; outputs already exist for '
+            f'{foundation_model} down_samp_step={down_samp_step}.'
+        )
+        return
     
     local_dir = ckpt_path
     if foundation_model == 'uni':
@@ -203,7 +216,7 @@ def histology_feature_extraction(prefix, save_folder,
     Foundation model name: {foundation_model}
     Start extracting histology feature embeddings...''')
     
-    he = load_image(_resolve_image_path(prefix, 'he'))
+    he = load_image(_resolve_image_path(p1_dir, 'he'))
     if foundation_model == 'uni' or foundation_model == 'gigapath':
         stride_init = 16
         patch_size = 16
@@ -212,7 +225,7 @@ def histology_feature_extraction(prefix, save_folder,
         patch_size = 14
         
     dataset = PatchDataset(he, patch_size=patch_size, stride=stride_init*down_samp_step, model=foundation_model)
-    save_pickle(dataset.num_patches, pickle_folder+'num_patches.pickle')
+    save_pickle(dataset.num_patches, num_patches_path)
     pin_memory = device.type == 'cuda'
     dataloader = DataLoader(
         dataset,
@@ -299,7 +312,9 @@ def histology_feature_extraction(prefix, save_folder,
             
         if (batch_idx*batch_size)//100000 < ((batch_idx+1)*batch_size)//100000 or batch_idx == len(dataloader) - 1:
             print(f"Part {part_cnts} patch number: {len(patch_embeddings)}")
-            save_pickle(patch_embeddings, pickle_folder+foundation_model+
+            save_pickle(patch_embeddings, p3_dir+foundation_model+
                         f'_embeddings_downsamp_{down_samp_step}_part_{part_cnts}.pickle')
             patch_embeddings = []
             part_cnts += 1
+
+    save_pickle(expected_metadata, completion_marker)

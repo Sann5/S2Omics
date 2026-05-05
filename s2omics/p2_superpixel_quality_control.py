@@ -1,22 +1,17 @@
-import shutil
-import argparse
-import pandas as pd
-import numpy as np
-import os 
-from time import time
 import os
+
+import numpy as np
 import matplotlib.pyplot as plt
-from .HistoSweep.saveParameters import saveParams
+from PIL import Image
+
+from . import step_paths
 from .HistoSweep.computeMetrics import compute_metrics_memory_optimized
 from .HistoSweep.densityFiltering import compute_low_density_mask
 from .HistoSweep.textureAnalysis import run_texture_analysis
 from .HistoSweep.ratioFiltering import run_ratio_filtering
 from .HistoSweep.generateMask import generate_final_mask
-from .HistoSweep.additionalPlots import generate_additionalPlots
-from PIL import Image
+from .HistoSweep.UTILS import get_image_filename, load_image
 from .s1_utils import save_pickle
-from .HistoSweep.UTILS import get_image_filename,load_image
-
 
 
 def patchify(x, patch_size):
@@ -26,8 +21,8 @@ def patchify(x, patch_size):
             // patch_size * patch_size)
     pad_w = shape_ext[0] - x.shape[0]
     pad_h = shape_ext[1] - x.shape[1]
-    print(pad_w,pad_h)
-    x = np.pad(x, ((0, pad_w),(0, pad_h),(0, 0)), mode='edge')
+    print(pad_w, pad_h)
+    x = np.pad(x, ((0, pad_w), (0, pad_h), (0, 0)), mode='edge')
     patch_index_mask = np.zeros(np.shape(x)[:2])
     tiles_shape = np.array(x.shape[:2]) // patch_size
     tiles = []
@@ -46,74 +41,87 @@ def patchify(x, patch_size):
             original=shape_ori,
             padded=shape_ext,
             tiles=tiles_shape)
-    patch_index_mask = patch_index_mask[:np.shape(x)[0]-pad_w,:np.shape(x)[1]-pad_h]
+    patch_index_mask = patch_index_mask[:np.shape(x)[0] - pad_w, :np.shape(x)[1] - pad_h]
     return tiles, shapes, patch_index_mask
 
-def superpixel_quality_control(prefix, save_folder, 
-                              density_thresh = 100,
-                              clean_background_flag=False,
-                              min_size = 10, patch_size = 16,
-                              show_image = False):
-    """
-    clean_background_flag: Whether to preserve fibrous regions that are otherwise being incorrectly filtered out
-    """
-    histosweep_folder = 'HistoSweep_output'
-    if not os.path.exists(save_folder):
-        os.makedirs(save_folder)
-    save_folder = save_folder+'/'
-    if not os.path.exists(save_folder+'image_files'):
-        os.makedirs(save_folder+'image_files')
-    image_folder = save_folder+'image_files/'
-    if not os.path.exists(save_folder+'pickle_files'):
-        os.makedirs(save_folder+'pickle_files')
-    pickle_folder = save_folder+'pickle_files/'
-    
-    image = load_image(get_image_filename(prefix+'he'))
-    _,shapes,_ = patchify(image, patch_size)
-    # save shapes parameter to pickle folder
-    save_pickle(shapes, pickle_folder+'shapes.pickle')
 
-    # Flag for whether to rescale the image 
-    need_scaling_flag = False  # True if image resolution ≠ 0.5µm (or desired size) per pixel
-    # Flag for whether to preprocess the image 
-    need_preprocessing_flag = False  # True if image dimensions are not divisible by patch_size
+def superpixel_quality_control(save_folder,
+                               density_thresh=100,
+                               clean_background_flag=False,
+                               min_size=10, patch_size=16,
+                               show_image=False):
+    """Run superpixel QC.
 
-    he_std_norm_image_, he_std_image_, z_v_norm_image_, z_v_image_, ratio_norm_, ratio_norm_image_ = compute_metrics_memory_optimized(image, patch_size=patch_size)
-    
+    Reads ``he.*`` from ``save_folder/p1_preprocess/`` and writes outputs
+    (shapes/qc pickles, HistoSweep masks and plots) into
+    ``save_folder/p2_qc/`` and ``save_folder/p2_qc/HistoSweep_output/``.
+
+    clean_background_flag: Whether to remove small speckles in superpixel mask
+    """
+    p1_dir = step_paths.step_dir(save_folder, step_paths.P1_PREPROCESS, create=False)
+    p2_dir = step_paths.step_dir(save_folder, step_paths.P2_QC)
+    histosweep_dir = os.path.join(p2_dir, step_paths.HISTOSWEEP_SUBFOLDER)
+    os.makedirs(histosweep_dir, exist_ok=True)
+
+    shapes_output = p2_dir + 'shapes.pickle'
+    qc_output = p2_dir + 'qc_preserve_indicator.pickle'
+    if os.path.exists(shapes_output) and os.path.exists(qc_output):
+        print(
+            "Skipping QC; outputs already exist: "
+            f"'{shapes_output}', '{qc_output}'."
+        )
+        return
+
+    image = load_image(get_image_filename(p1_dir + 'he'))
+    _, shapes, _ = patchify(image, patch_size)
+    save_pickle(shapes, shapes_output)
+
+    he_std_norm_image_, he_std_image_, z_v_norm_image_, z_v_image_, ratio_norm_, ratio_norm_image_ = (
+        compute_metrics_memory_optimized(image, patch_size=patch_size)
+    )
+
     # identify low density superpixels
-    mask1_lowdensity = compute_low_density_mask(z_v_image_, he_std_image_, ratio_norm_, density_thresh=density_thresh)
-    
+    mask1_lowdensity = compute_low_density_mask(
+        z_v_image_, he_std_image_, ratio_norm_, density_thresh=density_thresh)
     print('Total selected for density filtering: ', mask1_lowdensity.sum())
-    
-    # perform texture analysis 
-    mask1_lowdensity_update = run_texture_analysis(prefix=prefix[:-1], image=image, tissue_mask=mask1_lowdensity, output_dir=histosweep_folder, patch_size=patch_size, glcm_levels=64)
 
-    
-    # identify low ratio superpixels
+    # HistoSweep functions construct paths as f"{prefix}/{output_dir}/...".
+    # Pass the p2 directory as prefix so HistoSweep outputs nest under p2_qc/.
+    histosweep_prefix = p2_dir.rstrip('/')
+
+    mask1_lowdensity_update = run_texture_analysis(
+        prefix=histosweep_prefix,
+        image=image,
+        tissue_mask=mask1_lowdensity,
+        output_dir=step_paths.HISTOSWEEP_SUBFOLDER,
+        patch_size=patch_size,
+        glcm_levels=64,
+    )
+
     mask2_lowratio, otsu_thresh = run_ratio_filtering(ratio_norm_, mask1_lowdensity_update)
     print(mask2_lowratio.shape)
-    
-    
-    generate_final_mask(prefix=prefix[:-1], he=image, output_dir=histosweep_folder, 
-                    mask1_updated = mask1_lowdensity_update, mask2 = mask2_lowratio, 
-                    clean_background = clean_background_flag, 
-                    super_pixel_size=patch_size, minSize = min_size)
 
-    ###########################################################
-    
+    generate_final_mask(
+        prefix=histosweep_prefix,
+        he=image,
+        mask1_updated=mask1_lowdensity_update,
+        mask2=mask2_lowratio,
+        output_dir=step_paths.HISTOSWEEP_SUBFOLDER,
+        clean_background=clean_background_flag,
+        super_pixel_size=patch_size,
+        minSize=min_size,
+    )
+
     print("Running successfully!")
 
-    # transform the mask image to matrix and save to a pickle file
-    # Load the image
-    img = Image.open(prefix+histosweep_folder+'/mask-small.png')
+    # convert mask-small.png into a boolean array, persist it as a pickle
+    mask_small_path = os.path.join(histosweep_dir, 'mask-small.png')
+    img = Image.open(mask_small_path)
     if show_image:
         plt.imshow(img)
 
     arr = np.array(img)
-
-    # Define threshold (0=black, 255=white)
     threshold = 128
     mask = arr > threshold  # True for white, False for black
 
-    # Save pickle for later use
-    save_pickle(mask, pickle_folder+'qc_preserve_indicator.pickle')
+    save_pickle(mask, qc_output)

@@ -2,11 +2,8 @@ import os
 import numpy as np
 import matplotlib.pyplot as plt
 from skimage.feature import graycomatrix, graycoprops
-from skimage.color import rgb2gray
-from scipy.ndimage import gaussian_filter
 from PIL import Image
-from matplotlib.colors import ListedColormap
-from .UTILS import load_image,measure_peak_memory
+from .UTILS import measure_peak_memory
 import pandas as pd
 from sklearn.mixture import GaussianMixture
 import cv2
@@ -28,8 +25,6 @@ def run_texture_analysis(prefix, image, tissue_mask, output_dir, patch_size=16, 
     os.makedirs(output, exist_ok=True)
 
     # Convert image to grayscale
-#     gray_image = rgb2gray(image)
-#     gray_image = (gray_image * 255).astype(np.uint8)
     gray_image = efficient_skimage_rgb2gray(image)
 
     # Process mask

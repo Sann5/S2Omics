@@ -186,6 +186,23 @@ def parse_args():
         help="Superpixel tile size in pixels (default 16).",
     )
     parser.add_argument(
+        "--density-thresh",
+        type=float,
+        default=100,
+        help="Density threshold used in step 2 low-density filtering.",
+    )
+    parser.add_argument(
+        "--clean-background-flag",
+        action="store_true",
+        help="Remove small superpixel speckles in step 2 mask generation.",
+    )
+    parser.add_argument(
+        "--min-size",
+        type=int,
+        default=10,
+        help="Minimum connected superpixel component size for cleanup.",
+    )
+    parser.add_argument(
         "--pixel-size",
         type=float,
         default=0.5,
@@ -231,11 +248,13 @@ def collect_inputs(args):
 
 
 def has_required_step4_files(sample_dir, foundation_model, down_samp_step):
-    pickle_dir = Path(sample_dir) / "S2Omics_output" / "pickle_files"
+    save_folder = Path(sample_dir) / "S2Omics_output"
+    p2_dir = save_folder / "p2_qc"
+    p3_dir = save_folder / "p3_features"
     required = [
-        pickle_dir / "shapes.pickle",
-        pickle_dir / "qc_preserve_indicator.pickle",
-        pickle_dir / f"{foundation_model}_embeddings_downsamp_{down_samp_step}_part_0.pickle",
+        p2_dir / "shapes.pickle",
+        p2_dir / "qc_preserve_indicator.pickle",
+        p3_dir / f"{foundation_model}_embeddings_downsamp_{down_samp_step}_part_0.pickle",
     ]
     return all(p.exists() for p in required)
 
@@ -278,11 +297,11 @@ def collect_existing_sample_dirs(args, require_step4_files=True):
         sample_msg = ""
         if discovered:
             first = sample_dirs[0]
-            first_pickle = first / "S2Omics_output" / "pickle_files"
+            first_save = first / "S2Omics_output"
             expected = [
-                first_pickle / "shapes.pickle",
-                first_pickle / "qc_preserve_indicator.pickle",
-                first_pickle / f"{args.foundation_model}_embeddings_downsamp_{args.down_samp_step}_part_0.pickle",
+                first_save / "p2_qc" / "shapes.pickle",
+                first_save / "p2_qc" / "qc_preserve_indicator.pickle",
+                first_save / "p3_features" / f"{args.foundation_model}_embeddings_downsamp_{args.down_samp_step}_part_0.pickle",
             ]
             missing_names = [p.name for p in expected if not p.exists()]
             sample_msg = (
@@ -291,8 +310,8 @@ def collect_existing_sample_dirs(args, require_step4_files=True):
             )
         raise ValueError(
             "No valid sample folders found for step4-only mode. "
-            "Expected S2Omics_output/pickle_files with shapes.pickle, "
-            "qc_preserve_indicator.pickle and embeddings part_0. "
+            "Expected S2Omics_output/p2_qc/{shapes.pickle, qc_preserve_indicator.pickle} "
+            "and S2Omics_output/p3_features/{foundation_model}_embeddings_downsamp_{step}_part_0.pickle. "
             f"Discovered {discovered} sample folder(s) under --work-dir.{sample_msg}"
         )
 
@@ -315,46 +334,6 @@ def should_run_step(args, step):
     return args.start_step <= step <= args.end_step
 
 
-def reset_step123_outputs(sample_out_dir, step, foundation_model, down_samp_step):
-    sample_path = Path(sample_out_dir)
-    s2_out = sample_path / "S2Omics_output"
-    pickle_dir = s2_out / "pickle_files"
-
-    if step == 1:
-        for rel in ["he.tiff", "he-scaled.tiff", "he.jpg", "he-scaled.jpg"]:
-            target = sample_path / rel
-            if target.exists():
-                target.unlink()
-    elif step == 2:
-        for rel in ["shapes.pickle", "qc_preserve_indicator.pickle"]:
-            target = pickle_dir / rel
-            if target.exists():
-                target.unlink()
-    elif step == 3:
-        target = pickle_dir / "num_patches.pickle"
-        if target.exists():
-            target.unlink()
-        for emb in pickle_dir.glob(
-            f"{foundation_model}_embeddings_downsamp_{down_samp_step}_part_*.pickle"
-        ):
-            emb.unlink()
-
-
-def reset_step4_outputs(sample_out_dir):
-    sample_path = Path(sample_out_dir)
-    s2_out = sample_path / "S2Omics_output"
-    image_dir = s2_out / "image_files"
-    pickle_dir = s2_out / "pickle_files"
-
-    for rel in ["cluster_image.pickle", "clustering_metrics.pickle"]:
-        target = pickle_dir / rel
-        if target.exists():
-            target.unlink()
-    for ext in ["jpg", "jpeg", "tif", "tiff"]:
-        for image in image_dir.glob(f"cluster_image_num_clusters_*.{ext}"):
-            image.unlink()
-
-
 def process_one_steps123(ndpi_path, args):
     """Run steps 1-3 for a single NDPI file (per-sample)."""
     sample_name = Path(ndpi_path).stem
@@ -363,32 +342,29 @@ def process_one_steps123(ndpi_path, args):
 
     print(f"[START steps 1-3] {sample_name}")
 
-    prefix = sample_out_dir.rstrip("/") + "/"
     save_folder = os.path.join(sample_out_dir, "S2Omics_output")
 
     if should_run_step(args, 1):
-        reset_step123_outputs(
-            sample_out_dir, 1, args.foundation_model, args.down_samp_step,
-        )
         convert_ndpi_with_fallback(
             ndpi_path=ndpi_path,
-            sample_out_dir=sample_out_dir,
+            save_folder=save_folder,
             target_level=args.target_level,
         )
-        histology_preprocess(prefix, show_image=args.show_image)
+        histology_preprocess(save_folder, show_image=args.show_image)
 
     if should_run_step(args, 2):
-        reset_step123_outputs(
-            sample_out_dir, 2, args.foundation_model, args.down_samp_step,
+        superpixel_quality_control(
+            save_folder,
+            density_thresh=args.density_thresh,
+            clean_background_flag=args.clean_background_flag,
+            min_size=args.min_size,
+            patch_size=args.patch_size,
+            show_image=args.show_image,
         )
-        superpixel_quality_control(prefix, save_folder, show_image=args.show_image)
 
     if should_run_step(args, 3):
-        reset_step123_outputs(
-            sample_out_dir, 3, args.foundation_model, args.down_samp_step,
-        )
         histology_feature_extraction(
-            prefix, save_folder,
+            save_folder,
             foundation_model=args.foundation_model,
             ckpt_path=args.ckpt_path,
             device=args.device,
@@ -402,19 +378,11 @@ def process_one_steps123(ndpi_path, args):
 
 def run_joint_step4(sample_dirs, args):
     """Run joint histology segmentation (step 4) across all samples at once."""
-    prefix_list = []
-    save_folder_list = []
-
-    for sample_dir in sample_dirs:
-        prefix_list.append(str(Path(sample_dir).resolve()) + "/")
-        save_folder = os.path.join(sample_dir, "S2Omics_output")
-        save_folder_list.append(save_folder)
-        reset_step4_outputs(sample_dir)
+    save_folder_list = [os.path.join(sample_dir, "S2Omics_output") for sample_dir in sample_dirs]
 
     pca_model_path = args.global_pca_model_path or ""
 
     get_joint_histology_segmentation(
-        prefix_list=prefix_list,
         save_folder_list=save_folder_list,
         foundation_model=args.foundation_model,
         down_samp_step=args.down_samp_step,

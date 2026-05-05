@@ -4,7 +4,6 @@ import tifffile
 import pickle
 import os
 
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import yaml
@@ -53,6 +52,34 @@ def mkdir(path):
     dirname = os.path.dirname(path)
     if dirname != '':
         os.makedirs(dirname, exist_ok=True)
+
+
+def file_exists(path):
+    return os.path.exists(path)
+
+
+def all_files_exist(*paths):
+    return all(os.path.exists(path) for path in paths)
+
+
+def load_pickle_if_exists(filename, verbose=True):
+    if not os.path.exists(filename):
+        return None
+    return load_pickle(filename, verbose=verbose)
+
+
+def stage_is_complete(marker_path, expected_metadata=None, required_outputs=()):
+    if required_outputs and not all_files_exist(*required_outputs):
+        return False
+    if not os.path.exists(marker_path):
+        return False
+    if expected_metadata is None:
+        return True
+    try:
+        current_metadata = load_pickle(marker_path, verbose=False)
+    except Exception:
+        return False
+    return current_metadata == expected_metadata
 
 
 def load_image(filename, verbose=True):

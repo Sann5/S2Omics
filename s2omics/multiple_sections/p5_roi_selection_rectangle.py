@@ -1,12 +1,13 @@
 import os
 import numpy as np
-import argparse
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 import cv2
 import math
+
+from .. import step_paths
 from ..s1_utils import (
-        load_image, load_pickle, save_pickle, setup_seed)
+    load_pickle, save_pickle, setup_seed, stage_is_complete)
 
 def euclid_distance(point1, point2):
     tmp = np.array(point1)-np.array(point2)
@@ -243,29 +244,39 @@ def region_selection_random(save_folder, cluster_image, cluster_image_rgb, valid
     print(f'Found the optimal number of ROI: {curr_num_roi-2}. Program finished.')
     return curr_num_roi-2, best_roi_list[:-1], best_rotate_list[:-1], best_roi_mask_list[:-1], best_comp_list[:-1], best_roi_score_list[:-1]
 
-def roi_selection_for_multiple_sections(prefix_list, save_folder_list,
+def roi_selection_for_multiple_sections(save_folder_list,
                                         has_annotation=False, cache_path_list='',
-                                        down_samp_step=10, roi_size=[6.5,6.5], 
+                                        down_samp_step=10, roi_size=[6.5, 6.5],
                                         rotation_seg=6,
-                                        num_roi=0, optimal_roi_thres=0.03, 
-                                        fusion_weights=[0.33,0.33,0.33], 
+                                        num_roi=0, optimal_roi_thres=0.03,
+                                        fusion_weights=[0.33, 0.33, 0.33],
                                         emphasize_clusters=[], discard_clusters=[],
                                         prior_preference=1):
-    ''' 
-    select best ROI(s)
-    Parameters:
-        has_annotation: if use annotation instead of histology segmentation for ROI selection, default=False
-        down_samp_step: the down-sampling step for feature extraction, default = 10, which refers to 1:10^2 down-sampling rate
-        roi_size: the physical size (mm x mm) of ROIs, default = [6.5, 6.5] which is the physical size for Visium HD ROI
-        rotation_seg: the number of difference angles ROI can rotate
-        num_roi: number of ROIs to be selected, default = 0 refers to automatic determination
-        optimal_roi_thres: hyper-parameter for automatic ROI determination, default = 0.03 is suitable for most cases, recommend to be set as 0 when selecting FOVs. If you want to select more ROIs, please lower this parameter
-        fusion_weights: the weight of three scores, default=[0.33,0.33,0.33], the sum of three weights should be equal to 1 (if not they will be normalized)
-        emphasize_clusters, discard_clusters: prior information about interested and not-interested histology clusters, default = [],[]
-        prior_preference: to what extend should the positive prior clusters be emphasized, default = 2
-        prior_preference: the larger this parameter is, S2Omics will focus more on those interested histology clusters, default=  1
     '''
+    select best rectangle ROI(s) jointly across multiple sections.
 
+    Per-sample inputs are read from:
+        save_folder/p2_qc/shapes.pickle
+        save_folder/p4_segmentation/cluster_image.pickle (default)
+        save_folder/p4_segmentation/annotation.pickle, category_names.pickle (when has_annotation)
+
+    Outputs are written to the *first* save_folder under
+        save_folder_list[0]/p5_roi_selection/
+
+    Parameters:
+        save_folder_list: list of per-sample S2Omics output roots
+        has_annotation: if True, use annotation instead of histology segmentation, default=False
+        cache_path_list: optional path to a text file listing per-sample cluster_image
+            pickle paths (overrides the default lookup)
+        down_samp_step: down-sampling step used during step 3, default=10
+        roi_size: physical size (mm x mm) of ROIs, default=[6.5, 6.5] for Visium HD
+        rotation_seg: number of rotation discretizations for the rectangle
+        num_roi: number of ROIs to select; 0 = automatic determination
+        optimal_roi_thres: threshold for automatic determination, default=0.03
+        fusion_weights: weights for [scale, coverage, balance] scores; sum normalised
+        emphasize_clusters, discard_clusters: prior-knowledge cluster preferences
+        prior_preference: weighting for emphasised clusters, default=1
+    '''
     setup_seed(42)
 
     # define color palette
@@ -277,70 +288,66 @@ def roi_selection_for_multiple_sections(prefix_list, save_folder_list,
         color_list_16bit.append(line.strip())
 
     save_folder_list_raw = save_folder_list
-    assert len(prefix_list) == len(save_folder_list_raw)
-    
+    n_images = len(save_folder_list_raw)
+
     if len(cache_path_list) > 0:
         with open(cache_path_list, "r", encoding="utf-8") as file:
             lines = file.readlines()
         cache_path_list = [line.split()[0] for line in lines]
-        assert len(prefix_list) == len(cache_path_list)
+        assert n_images == len(cache_path_list)
 
-    n_images = len(prefix_list)
+    # Outputs land in the first sample's p5_roi_selection/ folder.
+    p5_root = step_paths.step_dir(save_folder_list_raw[0], step_paths.P5_ROI_SELECTION)
+    roi_subdir = p5_root + f'rectangle_roi_size_{roi_size[0]}_{roi_size[1]}/'
+    save_subfolder = roi_subdir + f'prior_preference_{prior_preference}/'
+    os.makedirs(save_subfolder, exist_ok=True)
+
+    completion_marker = p5_root + 'multi_rectangle_roi_selection_complete.pickle'
+    expected_metadata = {
+        'save_folder_list': [os.path.abspath(folder) for folder in save_folder_list_raw],
+        'has_annotation': has_annotation,
+        'cache_path_list': [os.path.abspath(path) for path in cache_path_list] if len(cache_path_list) > 0 else '',
+        'down_samp_step': down_samp_step,
+        'roi_size': tuple(roi_size),
+        'rotation_seg': rotation_seg,
+        'num_roi': num_roi,
+        'optimal_roi_thres': optimal_roi_thres,
+        'fusion_weights': tuple(fusion_weights),
+        'emphasize_clusters': tuple(emphasize_clusters),
+        'discard_clusters': tuple(discard_clusters),
+        'prior_preference': prior_preference,
+    }
+    best_roi_path = save_subfolder + 'best_roi.pickle'
+    if stage_is_complete(completion_marker, expected_metadata, required_outputs=(best_roi_path,)):
+        print(
+            'Skipping multi-section ROI selection; outputs already exist for '
+            f'roi_size={roi_size} and num_roi={num_roi}.'
+        )
+        return
 
     dpi = 1200
-    save_folder_list = []
-    image_folder_list = []
-    pickle_folder_list = []
     image_shape_list = []
-    cluster_image_shape_list = []
     cluster_image_list = []
-    cluster_image_rgb_list = []
-    cluster_image_mask_list = []
-    
+    category_names = None
+
     for i in range(n_images):
-        prefix = prefix_list[i]
         save_folder = save_folder_list_raw[i]
-        if len(cache_path_list) > 0:
-            cache_path = cache_path_list[i]
-        if not os.path.exists(save_folder):
-            os.makedirs(save_folder)
-        save_folder = save_folder+'/'
-        save_folder_list.append(save_folder)
-        if not os.path.exists(save_folder+'image_files'):
-            os.makedirs(save_folder+'image_files')
-        image_folder = save_folder+'image_files/'
-        image_folder_list.append(image_folder)
-        if not os.path.exists(save_folder+'pickle_files'):
-            os.makedirs(save_folder+'pickle_files')
-        pickle_folder = save_folder+'pickle_files/'
-        pickle_folder_list.append(pickle_folder)
-        if i == 0:
-            if not os.path.exists(save_folder+'main_output'):
-                os.makedirs(save_folder+'main_output')
-            main_output_folder = save_folder+'main_output/'
-            if not os.path.exists(save_folder+f'roi_selection_detailed_output/circle_roi_size_{roi_size[0]}_{roi_size[1]}'):
-                os.makedirs(save_folder+f'roi_selection_detailed_output/circle_roi_size_{roi_size[0]}_{roi_size[1]}')
-            roi_save_folder = save_folder+f'roi_selection_detailed_output/circle_roi_size_{roi_size[0]}_{roi_size[1]}/'
-            if not os.path.exists(roi_save_folder+f'prior_preference_{prior_preference}'):
-                os.makedirs(roi_save_folder+f'prior_preference_{prior_preference}')
-            save_subfolder = roi_save_folder+f'prior_preference_{prior_preference}/'
-    
+        p2_dir = step_paths.step_dir(save_folder, step_paths.P2_QC, create=False)
+        p4_dir = step_paths.step_dir(save_folder, step_paths.P4_SEGMENTATION, create=False)
+
         # load in previously obtained params
-        shapes = load_pickle(pickle_folder+'shapes.pickle')
+        shapes = load_pickle(p2_dir + 'shapes.pickle')
         image_shape = shapes['tiles']
-        down_samp_shape = [(image_shape[0]-1)//down_samp_step+1, (image_shape[1]-1)//down_samp_step+1]
+        down_samp_shape = [(image_shape[0] - 1) // down_samp_step + 1, (image_shape[1] - 1) // down_samp_step + 1]
         image_shape_list.append(down_samp_shape)
 
         if has_annotation:
-            cluster_image = load_pickle(pickle_folder+'annotation.pickle')
-            category_names = load_pickle(pickle_folder+'category_names.pickle')
+            cluster_image = load_pickle(p4_dir + 'annotation.pickle')
+            category_names = load_pickle(p4_dir + 'category_names.pickle')
         elif len(cache_path_list) > 0:
             cluster_image = load_pickle(cache_path_list[i])
         else:
-            if os.path.exists(pickle_folder+'adjusted_cluster_image.pickle'):
-                cluster_image = load_pickle(pickle_folder+'adjusted_cluster_image.pickle')
-            else:
-                cluster_image = load_pickle(pickle_folder+'cluster_image.pickle')
+            cluster_image = load_pickle(p4_dir + 'cluster_image.pickle')
         cluster_image_list.append(cluster_image)
 
     print([np.shape(image) for image in cluster_image_list])
@@ -429,13 +436,11 @@ def roi_selection_for_multiple_sections(prefix_list, save_folder_list,
                                     window_size[0],window_size[1],color='red',fill=False,
                                     linewidth=2,angle=-best_rotate[i]))
     if has_annotation:
-        plt.savefig(main_output_folder+'best_roi_on_annotation.jpg', 
-                format='jpg', dpi=1200, bbox_inches='tight',pad_inches=0)
+        out_jpg = p5_root + 'best_roi_on_annotation.jpg'
     else:
-        plt.savefig(main_output_folder+'best_roi_on_histology_segmentations.jpg', 
-                    format='jpg', dpi=1200, bbox_inches='tight',pad_inches=0)
+        out_jpg = p5_root + 'best_roi_on_histology_segmentations.jpg'
+    plt.savefig(out_jpg, format='jpg', dpi=1200, bbox_inches='tight', pad_inches=0)
     plt.close()
-    if has_annotation:
-        print('Best ROI on annotation image is stored at '+main_output_folder+'best_roi_on_annotation.jpg')
-    else:
-        print('Best ROI on histology segmentation image is stored at '+main_output_folder+'best_roi_on_histology_segmentations.jpg')
+    print(f'Best ROI image stored at {out_jpg}')
+
+    save_pickle(expected_metadata, completion_marker)
