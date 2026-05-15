@@ -197,6 +197,42 @@ def parse_args():
         help="Remove small superpixel speckles in step 2 mask generation.",
     )
     parser.add_argument(
+        "--masking-method",
+        type=str,
+        default="s2omics",
+        choices=["s2omics", "victor"],
+        help="Masking procedure for step 2: default S2-Omics/HistoSweep or Victor's grayscale/Gaussian/Otsu mask.",
+    )
+    parser.add_argument(
+        "--victor-mean-threshold",
+        type=float,
+        default=0.85,
+        help="Victor masking stopping threshold on normalized grayscale non-tissue pixels.",
+    )
+    parser.add_argument(
+        "--victor-max-iterations",
+        type=int,
+        default=5,
+        help="Maximum Gaussian/Otsu iterations for Victor masking.",
+    )
+    parser.add_argument(
+        "--victor-sigma",
+        type=float,
+        default=20,
+        help="Gaussian sigma for Victor masking.",
+    )
+    parser.add_argument(
+        "--victor-positive-contrast",
+        action="store_true",
+        help="Use when tissue is brighter than background. By default Victor masking expects dark tissue on bright background.",
+    )
+    parser.add_argument(
+        "--victor-superpixel-threshold",
+        type=float,
+        default=0.5,
+        help="Minimum tissue-pixel fraction required to keep a superpixel in Victor masking.",
+    )
+    parser.add_argument(
         "--min-size",
         type=int,
         default=10,
@@ -359,6 +395,12 @@ def process_one_steps123(ndpi_path, args):
             clean_background_flag=args.clean_background_flag,
             min_size=args.min_size,
             patch_size=args.patch_size,
+            masking_method=args.masking_method,
+            victor_mean_threshold=args.victor_mean_threshold,
+            victor_max_iterations=args.victor_max_iterations,
+            victor_sigma=args.victor_sigma,
+            victor_positive_contrast=args.victor_positive_contrast,
+            victor_superpixel_threshold=args.victor_superpixel_threshold,
             show_image=args.show_image,
         )
 

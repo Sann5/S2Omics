@@ -25,6 +25,13 @@ def get_args():
     parser.add_argument('--device', type=str, default='cuda:0')
     parser.add_argument('--density_thresh', type=float, default=100)
     parser.add_argument('--clean_background_flag', action='store_true')
+    parser.add_argument('--masking_method', type=str, default='s2omics',
+                        choices=['s2omics', 'victor'])
+    parser.add_argument('--victor_mean_threshold', type=float, default=0.85)
+    parser.add_argument('--victor_max_iterations', type=int, default=5)
+    parser.add_argument('--victor_sigma', type=float, default=20)
+    parser.add_argument('--victor_positive_contrast', action='store_true')
+    parser.add_argument('--victor_superpixel_threshold', type=float, default=0.5)
     parser.add_argument('--min_size', type=int, default=10)
     parser.add_argument('--patch_size', type=int, default=16)
     return parser.parse_args()
@@ -38,6 +45,12 @@ def main():
         clean_background_flag=args.clean_background_flag,
         min_size=args.min_size,
         patch_size=args.patch_size,
+        masking_method=args.masking_method,
+        victor_mean_threshold=args.victor_mean_threshold,
+        victor_max_iterations=args.victor_max_iterations,
+        victor_sigma=args.victor_sigma,
+        victor_positive_contrast=args.victor_positive_contrast,
+        victor_superpixel_threshold=args.victor_superpixel_threshold,
         show_image=False,
     )
 

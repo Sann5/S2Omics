@@ -84,6 +84,65 @@ def get_cluster_feature_columns(df):
     return sorted(cols, key=_cluster_sort_key)
 
 
+def exclude_background_clusters(df, background_cluster_ids, renormalize=True, verbose=True):
+    """Drop `freq_cluster_{id}` columns for the listed cluster IDs.
+
+    The cluster IDs follow the pickle scheme used everywhere downstream
+    (0-indexed; matches `freq_cluster_*` column suffixes). Note that the
+    cluster_image.jpg legend labels the same clusters 1..N — see the
+    pipeline notes — so subtract 1 if you read IDs off the JPG legend.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Per-patient table with `freq_cluster_*` columns (typically `merged_df`).
+    background_cluster_ids : iterable of int
+        Cluster IDs to drop. Empty -> no-op (returns a copy).
+    renormalize : bool, default True
+        If True, rescale the remaining `freq_cluster_*` columns so each
+        row sums to 1 (fraction of *non-background* tissue). If False,
+        leave them as fraction of total tissue.
+    verbose : bool, default True
+        Print a one-line summary of what was dropped.
+
+    Returns
+    -------
+    pd.DataFrame
+        Copy of `df` with the requested columns dropped (and optionally
+        renormalized). Background IDs that aren't present in `df` are
+        silently skipped.
+    """
+    out = df.copy()
+    requested = [f'freq_cluster_{int(cid)}' for cid in background_cluster_ids]
+    present = [c for c in requested if c in out.columns]
+    missing = [c for c in requested if c not in out.columns]
+
+    if not present:
+        if verbose:
+            print(f'[exclude_background] No matching freq_cluster_* columns found '
+                  f'(asked for {len(requested)}); df returned unchanged.')
+        return out
+
+    out = out.drop(columns=present)
+
+    if renormalize:
+        remaining = get_cluster_feature_columns(out)
+        if remaining:
+            row_sums = out[remaining].sum(axis=1).replace(0, np.nan)
+            out[remaining] = out[remaining].div(row_sums, axis=0).fillna(0.0)
+
+    if verbose:
+        print(f'[exclude_background] Dropped {len(present)} cluster column(s): {present}')
+        if missing:
+            print(f'  Skipped (not in df): {missing}')
+        if renormalize:
+            print('  Remaining freq_cluster_* columns renormalized to sum to 1 per row.')
+        else:
+            print('  Frequencies kept as fraction of total tissue (no renormalization).')
+
+    return out
+
+
 def _select_p_col(df, use_fdr):
     return 'p_fdr' if use_fdr and 'p_fdr' in df.columns else 'p'
 

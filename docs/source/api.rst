@@ -46,7 +46,15 @@ or with low structural quality, using density and texture analysis. The new vers
 
 - density_thresh: HistoSweep parameter, threshold for identifying low density superpixels, int, default=100
 
-- clean_background_flag: HistoSweep parameter, whether to preserve fibrous regions that are otherwise being incorrectly filtered out, bool, default=False
+- clean_background_flag: HistoSweep parameter, whether to remove small superpixel speckles, bool, default=False
+
+- masking_method: mask-generation method, either ``s2omics`` for the default HistoSweep/S2-Omics mask or ``victor`` for the grayscale/Gaussian/Otsu alternative, str, default=``s2omics``
+
+- victor_mean_threshold: Victor masking stopping threshold on normalized grayscale non-tissue pixels, float, default=0.85
+
+- victor_sigma: Gaussian sigma for Victor masking, float, default=20
+
+- victor_superpixel_threshold: minimum tissue-pixel fraction required to keep a superpixel when using Victor masking, float, default=0.5
 
 - patch_size: the shape of superpixels, int, default=16 means that all superpixels are 16*16 pathces
 
