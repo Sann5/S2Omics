@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=s2omics_step13_array
+#SBATCH --job-name=s2omics_auto_step13_array
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=12
 #SBATCH --mem=1024GB
@@ -16,9 +16,13 @@ set -euo pipefail
 ROOT_DIR="/scratch/gsolun"
 PROJECT_DIR="${ROOT_DIR}/S2Omics"
 WORK_DIR="${PROJECT_DIR}/outputs_1"
-# Process exactly the samples produced by run_manual_sample_preprocessing.sh
-# (steps 0+1 already done with manual crops). This list is written by that job.
-INPUT_LIST="${WORK_DIR}/manual_preprocessed_inputs.txt"
+NDPI_DIR="${ROOT_DIR}/Data/NSCLC1/HES1"
+# Samples that were NOT manually preprocessed -> full-slide auto conversion.
+# Build this list ONCE on the login node BEFORE sbatch (excludes the manual set):
+#   comm -23 <(ls -1 ${ROOT_DIR}/Data/NSCLC1/HES1/*.ndpi | LC_ALL=C sort) \
+#            <(LC_ALL=C sort ${WORK_DIR}/manual_preprocessed_inputs.txt) \
+#            > ${WORK_DIR}/auto_inputs.txt
+INPUT_LIST="${WORK_DIR}/auto_inputs.txt"
 
 # Model settings
 FOUNDATION_MODEL="uni"
@@ -30,27 +34,21 @@ NUM_WORKERS=2
 TARGET_LEVEL=0
 
 # === PIPELINE STEPS TO EXECUTE ===
-# Set START_STEP and END_STEP to define the range of steps to run.
-# Actual run_batch.py step mapping (NOT the same as the old comment):
+# run_batch.py step mapping:
 #   1 = NDPI conversion + histology preprocess (p0 + p1)
 #   2 = superpixel QC / masking (p2)
 #   3 = feature extraction (p3)
 #   4 = joint segmentation (p4)
 #
-# Steps 0+1 were already produced by run_manual_sample_preprocessing.sh with
-# manual crops, so we START AT STEP 2 -- starting at 1 would re-run NDPI
-# conversion WITHOUT the manual crops and overwrite them.
-#
-# IMPORTANT: Step 4 uses JOINT clustering across all samples
-# (global PCA + Harmony + joint KMeans). It MUST be launched in a single
-# non-array job that sees every sample at once. Do NOT extend END_STEP past 3
-# in this array script -- use step4.slurm for step 4 instead, and set its
-# DOWN_SAMP_STEP to match the value above (5) or it won't find these embeddings.
-START_STEP=2
+# These samples have NO manual crops, so we START AT STEP 1 to auto-convert the
+# full slide and preprocess, then mask (step 2) and extract features (step 3).
+# Outputs go to the SAME work-dir as the manual run so the later joint step 4
+# clusters manual + non-manual samples together. Keep DOWN_SAMP_STEP, masking,
+# and work-dir identical to step123.slurm for comparable results.
+START_STEP=1
 END_STEP=3
 
-# === STEP 2 MASKING ===
-# Victor's grayscale/Gaussian/Otsu mask instead of the default s2omics mask.
+# === STEP 2 MASKING === (must match step123.slurm for comparability)
 MASKING_METHOD="victor"
 VICTOR_MEAN_THRESHOLD=0.85
 VICTOR_MAX_ITERATIONS=5
@@ -69,6 +67,16 @@ TASK_ID="${SLURM_ARRAY_TASK_ID:-0}"
 mkdir -p "${PROJECT_DIR}/logs"
 cd "${PROJECT_DIR}"
 
+# Fail fast (on every array task) if the exclusion list was not built yet.
+if [[ ! -f "${INPUT_LIST}" ]]; then
+  echo "[ERROR] Input list not found: ${INPUT_LIST}" >&2
+  echo "        Build it ONCE on the login node before submitting:" >&2
+  echo "          comm -23 <(ls -1 ${NDPI_DIR}/*.ndpi | LC_ALL=C sort) \\" >&2
+  echo "                   <(LC_ALL=C sort ${WORK_DIR}/manual_preprocessed_inputs.txt) \\" >&2
+  echo "                   > ${INPUT_LIST}" >&2
+  exit 1
+fi
+
 # Load module and activate environment
 module load miniforge3/25.3.0-3
 source activate s2omics
@@ -78,19 +86,14 @@ export PYTHONUNBUFFERED=1
 
 # Print execution plan
 echo "=========================================="
-echo "S2Omics Pipeline Configuration"
+echo "S2Omics Pipeline Configuration (auto / non-manual samples)"
 echo "=========================================="
 echo "Steps to execute: ${START_STEP}-${END_STEP}"
-if [[ ${START_STEP} -le 3 && ${END_STEP} -ge 3 ]]; then
-  echo "  - Step 3: Feature extraction (model: ${FOUNDATION_MODEL})"
-fi
-if [[ ${START_STEP} -le 2 && ${END_STEP} -ge 2 ]]; then
-  echo "  - Step 2: Superpixel QC (masking: ${MASKING_METHOD})"
-fi
+echo "  - Step 1: NDPI conversion + histology preprocess (full slide, level ${TARGET_LEVEL})"
+echo "  - Step 2: Superpixel QC (masking: ${MASKING_METHOD})"
+echo "  - Step 3: Feature extraction (model: ${FOUNDATION_MODEL})"
 echo "Down-sampling step: ${DOWN_SAMP_STEP}"
-if [[ ${START_STEP} -le 1 && ${END_STEP} -ge 1 ]]; then
-  echo "  - Step 1: Histology preprocessing"
-fi
+echo "Input list: ${INPUT_LIST}"
 echo "Output directory: ${WORK_DIR}"
 echo "=========================================="
 echo ""

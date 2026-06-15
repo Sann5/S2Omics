@@ -57,7 +57,22 @@ def convert_ndpi_to_tiff(
     output_tiff = os.path.join(out_dir, output_tiff)
     output_txt = os.path.join(out_dir, output_txt)
 
-    if os.path.exists(output_tiff) and os.path.exists(output_txt):
+    # Validate percentage ranges
+    for name, val in (
+        ("top", crop_top_percent),
+        ("bottom", crop_bottom_percent),
+        ("left", crop_left_percent),
+        ("right", crop_right_percent),
+    ):
+        if not (0.0 <= float(val) <= 100.0):
+            raise ValueError(f"Crop percent '{name}' must be between 0 and 100; got {val}")
+
+    has_cropping = any(
+        float(x) != 0.0 for x in (crop_top_percent, crop_bottom_percent, crop_left_percent, crop_right_percent)
+    )
+
+    # If outputs already exist and no cropping is requested, skip.
+    if os.path.exists(output_tiff) and os.path.exists(output_txt) and not has_cropping:
         print(f"Skipping NDPI conversion; outputs already exist: '{output_tiff}', '{output_txt}'.")
         return output_tiff
 
@@ -78,9 +93,6 @@ def convert_ndpi_to_tiff(
                 f.write("Unknown\n")
 
         width, height = slide.level_dimensions[target_level]
-
-        # Check if cropping is requested
-        has_cropping = any([crop_top_percent, crop_bottom_percent, crop_left_percent, crop_right_percent])
 
         if has_cropping:
             top_px = _percent_to_pixels(height, crop_top_percent)
@@ -111,11 +123,16 @@ def convert_ndpi_to_tiff(
                 f"left={left_px}, right={right_px} pixels"
             )
 
-            img = slide.read_region((x0, y0), target_level, (crop_w, crop_h)).convert("RGB")
+            # read_region expects level-0 coordinates for the location argument.
+            ds = slide.level_downsamples[target_level]
+            loc_x0 = int(round(x0 * ds))
+            loc_y0 = int(round(y0 * ds))
+            img = slide.read_region((loc_x0, loc_y0), target_level, (crop_w, crop_h)).convert("RGB")
         else:
             print(
                 f"Extracting level {target_level} with dimensions {width}x{height} pixels..."
             )
+            # full-level extraction: location (0,0) at level 0 maps to top-left of the image
             img = slide.read_region((0, 0), target_level, (width, height)).convert("RGB")
 
         print(f"Saving image to '{output_tiff}' (this may take a moment for large files)...")
@@ -140,8 +157,19 @@ def _has_he_raw(p0_dir):
     return False
 
 
-def convert_ndpi_with_fallback(ndpi_path, save_folder, target_level):
-    """Run convert_ndpi_to_tiff with retries at deeper pyramid levels."""
+def convert_ndpi_with_fallback(
+    ndpi_path,
+    save_folder,
+    target_level,
+    crop_top_percent=0,
+    crop_bottom_percent=0,
+    crop_left_percent=0,
+    crop_right_percent=0,
+):
+    """Run convert_ndpi_to_tiff with retries at deeper pyramid levels.
+
+    Crop parameters are forwarded so fallback attempts produce the intended cropped output.
+    """
     p0_dir = step_paths.step_dir(save_folder, step_paths.P0_NDPI_CONVERSION)
     for level in range(target_level, target_level + 5):
         try:
@@ -151,6 +179,10 @@ def convert_ndpi_with_fallback(ndpi_path, save_folder, target_level):
                 output_tiff="he-raw.tiff",
                 output_txt="pixel-size-raw.txt",
                 target_level=level,
+                crop_top_percent=crop_top_percent,
+                crop_bottom_percent=crop_bottom_percent,
+                crop_left_percent=crop_left_percent,
+                crop_right_percent=crop_right_percent,
             )
             if _has_he_raw(p0_dir) and (Path(p0_dir) / "pixel-size-raw.txt").exists():
                 if level != target_level:
