@@ -238,12 +238,6 @@ def parse_args():
         default=10,
         help="Minimum connected superpixel component size for cleanup.",
     )
-    parser.add_argument(
-        "--pixel-size",
-        type=float,
-        default=0.5,
-        help="Physical size of one pixel in µm (default 0.5).",
-    )
     return parser.parse_args()
 
 
@@ -433,6 +427,7 @@ def run_joint_step4(sample_dirs, args):
         resolution=args.resolution,
         if_evaluate=args.if_evaluate,
         pca_model_path=pca_model_path,
+        n_pca_components=args.n_pca_components,
     )
 
 

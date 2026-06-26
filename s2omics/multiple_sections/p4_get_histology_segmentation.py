@@ -37,7 +37,7 @@ def get_joint_histology_segmentation(save_folder_list,
                                     down_samp_step=10, clustering_method='kmeans',
                                     n_clusters=20, resolution=1.0,
                                     if_evaluate=False, pca_encoder=None,
-                                    pca_model_path=''):
+                                    pca_model_path='', n_pca_components=80):
     '''
     Joint histology segmentation across multiple sections using global PCA + Harmony + joint clustering.
     Parameters:
@@ -54,6 +54,7 @@ def get_joint_histology_segmentation(save_folder_list,
         if_evaluate: compute clustering metrics, default=False
         pca_encoder: optional pre-fitted PCA encoder; if provided, PCA fitting is skipped
         pca_model_path: optional path to serialized PCA encoder (used when pca_encoder is None)
+        n_pca_components: number of PCA components fitted when no pre-fitted PCA is provided, default=80
     '''
 
     # define color palette
@@ -171,7 +172,7 @@ def get_joint_histology_segmentation(save_folder_list,
         pca_encoder = load_pickle(pca_model_path)
         print(f'Loaded external PCA model from: {pca_model_path}')
     if pca_encoder is None:
-        pca_encoder = PCA(n_components=80)
+        pca_encoder = PCA(n_components=n_pca_components)
         pca_encoder.fit(he_embed_qc_concat)
         print('Fitted new PCA model on concatenated embeddings.')
         if len(pca_model_path) > 0:

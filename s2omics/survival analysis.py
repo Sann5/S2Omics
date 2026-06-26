@@ -22,6 +22,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from s2omics.s1_utils import load_pickle
+from s2omics.step_paths import P4_SEGMENTATION
 
 
 try:
@@ -59,14 +60,6 @@ def _normalize_event_binary(series):
     out[cleaned.isin(event_tokens)] = 1.0
     out[cleaned.isin(censor_tokens)] = 0.0
     return out
-
-
-def _normalize_save_folder(save_folder):
-    save_folder = Path(save_folder)
-    save_folder.mkdir(parents=True, exist_ok=True)
-    (save_folder / 'image_files').mkdir(parents=True, exist_ok=True)
-    (save_folder / 'pickle_files').mkdir(parents=True, exist_ok=True)
-    return str(save_folder) + '/'
 
 
 def clean_group_labels(series):
@@ -197,14 +190,14 @@ def discover_save_folders(root_dir, sample_names=None, require_cluster_image=Tru
 
     save_folders = []
     for candidate in candidates:
-        if (candidate / 'pickle_files').exists():
+        if (candidate / P4_SEGMENTATION).exists():
             save_folder = candidate
         elif (candidate / 'S2Omics_output').exists():
             save_folder = candidate / 'S2Omics_output'
         else:
             continue
 
-        if require_cluster_image and not (save_folder / 'pickle_files' / 'cluster_image.pickle').exists():
+        if require_cluster_image and not (save_folder / P4_SEGMENTATION / 'cluster_image.pickle').exists():
             continue
 
         save_folders.append(str(save_folder.resolve()))
@@ -212,8 +205,8 @@ def discover_save_folders(root_dir, sample_names=None, require_cluster_image=Tru
     if not save_folders:
         raise ValueError(
             f'No save folders found under {root}. '
-            'Expected either sample folders containing S2Omics_output/pickle_files '
-            'or direct S2Omics_output folders with cluster_image.pickle.'
+            f'Expected either sample folders containing S2Omics_output/{P4_SEGMENTATION}/cluster_image.pickle '
+            f'or direct S2Omics_output folders with {P4_SEGMENTATION}/cluster_image.pickle.'
         )
 
     return save_folders
@@ -230,10 +223,10 @@ def summarize_clusters(save_folder_list, patient_ids, output_path, patch_size=16
     records = []
 
     for save_folder, pid in zip(save_folder_list, patient_ids):
-        save_folder = _normalize_save_folder(save_folder)
-        pickle_folder = save_folder + 'pickle_files/'
+        save_folder = str(save_folder).rstrip('/') + '/'
+        segmentation_folder = save_folder + P4_SEGMENTATION + '/'
 
-        cluster_image = load_pickle(pickle_folder + 'cluster_image.pickle')
+        cluster_image = load_pickle(segmentation_folder + 'cluster_image.pickle')
 
         tissue_mask = cluster_image >= 0
         n_tissue = int(tissue_mask.sum())
