@@ -310,3 +310,17 @@ merged_clinical_cluster_summary.csv). Figures render inline in the notebook (no 
 <div align="center">
     <img src="/docs/source/images/S2Omics_pipeline.png" alt="S2Omics pipeline" width="80%">
 </div>
+
+
+# Santis mess
+
+```python
+python run_batch.py \
+  --input-glob '/capstor/scratch/cscs/sancas/s2omics/inputs/wsi/*.ndpi' \
+  --work-dir /capstor/scratch/cscs/sancas/s2omics/outputs \
+  --foundation-model uni --ckpt-path /capstor/scratch/cscs/sancas/s2omics/checkpoints/uni/ \
+  --device cuda:0 --down-samp-step 5 \
+  --masking-method victor \
+  --clustering-method kmeans --n-clusters 20 \
+  --start-step 3 --end-step 4
+```
