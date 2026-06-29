@@ -147,20 +147,19 @@ Full pipeline (steps 1→4) over a folder of NDPIs:
 
 ```bash
 python run_batch.py \
-  --input-glob '/data/wsi/**/*.ndpi' \      # or --input-list slides.txt (one .ndpi path per line)
-  --work-dir   /out/run1 \
+  --input-glob './inputs/wsi/*.ndpi' \
+  --work-dir   ./outputs \
   --foundation-model uni --ckpt-path ./checkpoints/uni/ \
   --device cuda:0 --down-samp-step 5 \
   --masking-method victor \
-  --clustering-method kmeans --n-clusters 20
+  --clustering-method kmeans --n-clusters 20 \
+  --start-step 3 --end-step 4
 ```
 
 Re-cluster only (step 4 on already-processed samples, no NDPIs needed):
 
 ```bash
-python run_batch.py --work-dir /out/run1 --start-step 4 --end-step 4 \
-  --foundation-model uni --down-samp-step 5 \
-  --global-pca-model-path /out/run1/global_pca_uni_downsamp_5.pickle
+python run_batch.py --work-dir ./outputs --start-step 1 --end-step 2 --input-glob './inputs/wsi/*.ndpi'
 ```
 
 Key arguments:
