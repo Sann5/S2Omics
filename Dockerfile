@@ -9,7 +9,7 @@ COPY requirements.txt .
 # know the two share the same cv2/ directory, leaving a hybrid/corrupted
 # install (AttributeError: module 'cv2.dnn' has no attribute 'DictValue').
 # Remove the base image's opencv first so only one clean cv2 build exists.
-RUN pip uninstall -y opencv opencv-python || true && \
+RUN pip uninstall -y opencv || true && \
     python -c "import site; print(site.getsitepackages()[0])" | xargs -I{} rm -rf {}/cv2*
 
 # Since pytorch and python are installed in the base env (from the image)
