@@ -67,7 +67,7 @@ numpy==1.26.0
 #nvidia-cusparse-cu11==11.7.4.91
 #nvidia-nccl-cu11==2.14.3
 #nvidia-nvtx-cu11==11.7.91
-opencv-python==4.8.1.78
+opencv-python-headless==4.8.1.78
 packaging==25.0
 pandas==2.3.1
 parso==0.8.4
@@ -132,3 +132,4 @@ yarl==1.20.1
 harmonypy==0.0.10
 brokenaxes==0.6.2
 openslide-python
+openslide-bin
